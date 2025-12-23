@@ -24,50 +24,62 @@ class SocketService {
       heartbeatOutgoing: 10000,
       
       debug: (str) => {
-        console.debug('[STOMP]', str);
+        // console.debug('[STOMP]', str);
       },
 
       onConnect: () => {
-        console.log('✅ STOMP: Connected successfully');
+        console.log('STOMP: Connected successfully');
         this._isConnected = true;
         this.reconnectAttempts = 0;
         this.notifyStatusChange(true);
         
         // Resubscribe to all conversations
+        // We iterate over the callbacks map because that tells us what the UI is interested in
         this.messageCallbacks.forEach((_, conversationId) => {
           this._doSubscribe(conversationId);
         });
       },
 
       onDisconnect: () => {
-        console.log('❌ STOMP: Disconnected');
-        this._isConnected = false;
-        this.notifyStatusChange(false);
+        console.log('STOMP: Disconnected');
+        this.handleDisconnect();
       },
 
       onStompError: (frame) => {
-        console.error('❌ STOMP Error:', frame.headers['message']);
+        console.error('STOMP Error:', frame.headers['message']);
         console.error('Details:', frame.body);
-        this._isConnected = false;
-        this.notifyStatusChange(false);
+        this.handleDisconnect();
       },
 
       onWebSocketClose: (event) => {
-        console.log('🔌 STOMP: WebSocket Closed', event);
-        this._isConnected = false;
-        this.notifyStatusChange(false);
+        console.log('STOMP: WebSocket Closed', event);
+        this.handleDisconnect();
         
         // Attempt reconnection
         if (this.reconnectAttempts < this.maxReconnectAttempts) {
           this.reconnectAttempts++;
-          console.log(`🔄 Attempting reconnection (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+          console.log(`Attempting reconnection (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
         }
       },
 
       onWebSocketError: (error) => {
-        console.error('❌ WebSocket Error:', error);
+        console.error('WebSocket Error:', error);
       }
     });
+  }
+
+  // Centralized disconnect handling
+  private handleDisconnect() {
+    this._isConnected = false;
+    this.notifyStatusChange(false);
+    
+    // CRITICAL FIX: Clear the subscription objects. 
+    // The server has dropped them, so we must re-request them on reconnect.
+    // We keep 'messageCallbacks' because the UI still wants those messages when we come back online.
+    this.subscriptions.forEach(sub => {
+        try { sub.unsubscribe(); } catch(e) { /* ignore */ }
+    });
+    this.subscriptions.clear();
   }
 
   get connected() {
@@ -92,20 +104,20 @@ class SocketService {
       this.client.connectHeaders = {
         Authorization: `Bearer ${token}`
       };
-      console.log('🔐 STOMP: Activating with Auth Token');
+      console.log('STOMP: Activating with Auth Token');
     } else {
-      console.warn('⚠️ STOMP: Activating without Auth Token');
+      console.warn('STOMP: Activating without Auth Token');
     }
 
     try {
       this.client.activate();
     } catch (error) {
-      console.error('❌ Failed to activate STOMP client:', error);
+      console.error('Failed to activate STOMP client:', error);
     }
   }
 
   deactivate() {
-    console.log('🛑 STOMP: Deactivating...');
+    console.log('STOMP: Deactivating...');
     this.subscriptions.forEach((sub, convId) => {
       try {
         sub.unsubscribe();
@@ -119,7 +131,7 @@ class SocketService {
     try {
       this.client.deactivate();
     } catch (error) {
-      console.error('❌ Failed to deactivate STOMP client:', error);
+      console.error('Failed to deactivate STOMP client:', error);
     }
     
     this._isConnected = false;
@@ -127,8 +139,6 @@ class SocketService {
   }
 
   subscribeToConversation(conversationId: string, callback: MessageCallback) {
-    console.log(`📥 Registering callback for conversation: ${conversationId}`);
-    
     if (!this.messageCallbacks.has(conversationId)) {
       this.messageCallbacks.set(conversationId, []);
     }
@@ -139,62 +149,55 @@ class SocketService {
     }
 
     // Subscribe immediately if connected
-    if (this._isConnected && !this.subscriptions.has(conversationId)) {
+    if (this._isConnected) {
       this._doSubscribe(conversationId);
     }
   }
 
   private _doSubscribe(conversationId: string) {
+    // If we already have a subscription object for this ID, check if it is still valid?
+    // Actually, due to the fix in handleDisconnect, if we are here, we probably need to subscribe.
     if (this.subscriptions.has(conversationId)) {
-      console.log(`ℹ️ Already subscribed to: ${conversationId}`);
       return;
     }
 
     const destination = `/topic/conversations/${conversationId}`;
-    console.log(`🔔 STOMP: Subscribing to ${destination}`);
+    console.log(`STOMP: Subscribing to ${destination}`);
     
     try {
       const sub = this.client.subscribe(destination, (message: IMessage) => {
         try {
-          console.log(`📨 STOMP: Raw message received on ${destination}:`, message.body);
           const body: Message = JSON.parse(message.body);
-          console.log(`📨 STOMP: Parsed message:`, body);
           
           const callbacks = this.messageCallbacks.get(conversationId);
           if (callbacks && callbacks.length > 0) {
-            console.log(`🔔 Notifying ${callbacks.length} callback(s) for conversation ${conversationId}`);
             callbacks.forEach(cb => {
               try {
                 cb(body);
               } catch (cbError) {
-                console.error('❌ Callback error:', cbError);
+                console.error('Callback error:', cbError);
               }
             });
-          } else {
-            console.warn(`⚠️ No callbacks registered for conversation ${conversationId}`);
           }
         } catch (err) {
-          console.error('❌ STOMP: Failed to parse or handle message:', err);
+          console.error('STOMP: Failed to parse or handle message:', err);
         }
       });
       
       this.subscriptions.set(conversationId, sub);
-      console.log(`✅ Successfully subscribed to ${destination}`);
     } catch (e) {
-      console.error(`❌ STOMP: Subscribe failed for ${destination}:`, e);
+      console.error(`STOMP: Subscribe failed for ${destination}:`, e);
     }
   }
 
   unsubscribeFromConversation(conversationId: string) {
-    console.log(`🔕 STOMP: Unsubscribing from ${conversationId}`);
     const sub = this.subscriptions.get(conversationId);
     if (sub) {
       try {
         sub.unsubscribe();
         this.subscriptions.delete(conversationId);
-        console.log(`✅ Unsubscribed from ${conversationId}`);
       } catch (e) {
-        console.error(`❌ Failed to unsubscribe from ${conversationId}:`, e);
+        console.error(`Failed to unsubscribe from ${conversationId}:`, e);
       }
     }
     this.messageCallbacks.delete(conversationId);
@@ -202,7 +205,7 @@ class SocketService {
 
   sendMessage(conversationId: string, senderId: string, ciphertext: string, iv: string): boolean {
     if (!this._isConnected) {
-      console.warn('⚠️ STOMP: Not connected, cannot send via socket');
+      console.warn('STOMP: Not connected, cannot send via socket');
       return false;
     }
 
@@ -214,17 +217,14 @@ class SocketService {
         iv
       };
       
-      console.log('📤 STOMP: Sending message:', payload);
-      
       this.client.publish({
         destination: '/app/chat.sendMessage',
         body: JSON.stringify(payload),
       });
       
-      console.log('✅ STOMP: Message sent successfully');
       return true;
     } catch (e) {
-      console.error("❌ STOMP: Publish failed:", e);
+      console.error("STOMP: Publish failed:", e);
       return false;
     }
   }

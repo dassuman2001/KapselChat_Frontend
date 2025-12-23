@@ -32,7 +32,9 @@ import {
   Lock,
   ArrowLeft,
   Wifi,
-  WifiOff
+  WifiOff,
+  Paperclip,
+  Camera
 } from 'lucide-react';
 import { format } from 'date-fns';
 
@@ -63,11 +65,11 @@ const App: React.FC = () => {
       const user = JSON.parse(storedUser);
       setCurrentUser(user);
       
-      console.log('🚀 Initializing socket connection for user:', user.id);
+      console.log('Initializing socket connection for user:', user.id);
       socketService.activate();
       
       const unsubscribe = socketService.onConnectionChange((isConnected) => {
-        console.log('🔌 Socket connection status changed:', isConnected);
+        console.log('Socket connection status changed:', isConnected);
         setIsSocketConnected(isConnected);
       });
       
@@ -89,11 +91,11 @@ const App: React.FC = () => {
 
   // Handle incoming WebSocket messages for ALL conversations
   const handleRealtimeMessage = useCallback(async (msg: Message) => {
-    console.log('📨 Received realtime message:', msg);
+    console.log('Received realtime message:', msg);
     
     // Check if we've already processed this message
     if (processedMessageIds.current.has(msg.id)) {
-      console.log('⚠️ Message already processed, skipping:', msg.id);
+      // It might be an echo of our own message sent via REST fallback, or a duplicate broadcast
       return;
     }
     
@@ -101,12 +103,11 @@ const App: React.FC = () => {
     processedMessageIds.current.add(msg.id);
     
     // Decrypt the message
-    let decryptedText = '⚠️ Decryption Failed';
+    let decryptedText = 'Decryption Failed';
     try {
       decryptedText = await decryptMessage(msg.ciphertext, msg.iv);
-      console.log('🔓 Message decrypted successfully');
     } catch (e) {
-      console.error("❌ Failed to decrypt realtime message:", e);
+      console.error("Failed to decrypt realtime message:", e);
     }
     
     const msgWithText = { ...msg, text: decryptedText };
@@ -114,14 +115,12 @@ const App: React.FC = () => {
     setMessages(prev => {
       const currentList = prev[msg.conversationId] || [];
       
-      // Double-check for duplicates based on ID
+      // Double-check for duplicates based on ID within state
       const exists = currentList.some(m => m.id === msg.id);
       if (exists) {
-        console.log('⚠️ Message already in list, skipping:', msg.id);
         return prev;
       }
       
-      console.log('✅ Adding new message to conversation:', msg.conversationId);
       const newList = [...currentList, msgWithText].sort((a, b) => 
         new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
       );
@@ -139,17 +138,14 @@ const App: React.FC = () => {
       return;
     }
 
-    console.log(`🔔 Subscribing to ${conversations.length} conversation(s)`);
+    console.log(`Subscribing to ${conversations.length} conversation(s)`);
     
     conversations.forEach(conv => {
       socketService.subscribeToConversation(conv.id, handleRealtimeMessage);
     });
 
-    // Cleanup: Don't unsubscribe on every render, only on unmount or when conversations change
     return () => {
-      console.log('🔕 Cleaning up conversation subscriptions');
-      // We keep subscriptions active for better real-time experience
-      // Only unsubscribe when component unmounts or conversations list changes significantly
+      // Optional: Cleanup if needed, but keeping subs active usually helps reconnection
     };
   }, [conversations, currentUser, isSocketConnected, handleRealtimeMessage]);
 
@@ -158,34 +154,29 @@ const App: React.FC = () => {
     if (!activeConversationId || !currentUser) return;
 
     const loadHistory = async () => {
-      // Prevent multiple simultaneous loads
       if (isLoadingHistory.current.has(activeConversationId)) {
-        console.log('📥 Already loading history for:', activeConversationId);
         return;
       }
 
       // Only load if we don't have messages yet
       if (messages[activeConversationId]?.length > 0) {
-        console.log('💾 Messages already loaded for:', activeConversationId);
         return;
       }
 
       isLoadingHistory.current.add(activeConversationId);
       
       try {
-        console.log('📥 Loading history for:', activeConversationId);
+        console.log('Loading history for:', activeConversationId);
         const history = await messageApi.getForConversation(activeConversationId);
-        console.log(`📥 Received ${history.length} historical messages`);
         
         const decryptedHistory = await Promise.all(history.map(async (m) => {
-          // Mark historical messages as processed
           processedMessageIds.current.add(m.id);
           
-          let text = '⚠️ Decryption Failed';
+          let text = 'Decryption Failed';
           try {
             text = await decryptMessage(m.ciphertext, m.iv);
           } catch (e) { 
-            console.error('❌ Decryption error for message:', m.id, e); 
+            console.error('Decryption error for message:', m.id, e); 
           }
           return { ...m, text };
         }));
@@ -197,9 +188,8 @@ const App: React.FC = () => {
           )
         }));
         
-        console.log('✅ History loaded successfully');
       } catch (err) {
-        console.error("❌ Failed to load history:", err);
+        console.error("Failed to load history:", err);
       } finally {
         isLoadingHistory.current.delete(activeConversationId);
       }
@@ -212,9 +202,7 @@ const App: React.FC = () => {
   const fetchConversations = useCallback(async () => {
     if (!currentUser) return;
     try {
-      console.log('📋 Fetching conversations...');
       const convs = await conversationApi.getAll();
-      console.log(`📋 Received ${convs.length} conversation(s)`);
       
       const cacheStr = localStorage.getItem(USER_CACHE_KEY);
       const cache = cacheStr ? JSON.parse(cacheStr) : {};
@@ -234,7 +222,6 @@ const App: React.FC = () => {
       setConversations(resolvedConvs);
 
       if (missingUserIds.size > 0) {
-        console.log(`👥 Fetching ${missingUserIds.size} missing user(s)...`);
         try {
           const fetchedUsers = await Promise.all(
             Array.from(missingUserIds).map(id => userApi.getUser(id).catch(() => null))
@@ -258,12 +245,12 @@ const App: React.FC = () => {
             setConversations(resolvedConvs);
           }
         } catch (e) {
-          console.error("❌ Error resolving users:", e);
+          console.error("Error resolving users:", e);
         }
       }
 
     } catch (err) {
-      console.error("❌ Failed to fetch conversations:", err);
+      console.error("Failed to fetch conversations:", err);
     }
   }, [currentUser]);
 
@@ -274,7 +261,6 @@ const App: React.FC = () => {
   }, [currentUser, fetchConversations]);
 
   const handleSelectConversation = (convId: string) => {
-    console.log('💬 Selected conversation:', convId);
     setActiveConversationId(convId);
     setIsMobileMenuOpen(false);
   };
@@ -289,7 +275,6 @@ const App: React.FC = () => {
     const tempId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
     try {
-      console.log('🔐 Encrypting message...');
       const { ciphertext, iv } = await encryptMessage(textToSend);
 
       const optimisticMsg: Message = {
@@ -311,14 +296,10 @@ const App: React.FC = () => {
         [activeConversationId]: [...(prev[activeConversationId] || []), optimisticMsg]
       }));
 
-      console.log('📤 Sending message...');
-      
       // Try WebSocket first
       const sentViaSocket = socketService.sendMessage(activeConversationId, currentUser.id, ciphertext, iv);
       
       if (sentViaSocket) {
-        console.log('✅ Message sent via WebSocket');
-        
         // Remove the optimistic message after a delay
         // The real message will come through WebSocket subscription
         setTimeout(() => {
@@ -326,13 +307,11 @@ const App: React.FC = () => {
             ...prev,
             [activeConversationId]: prev[activeConversationId].filter(m => m.id !== tempId)
           }));
-        }, 500);
+        }, 1000);
       } else {
-        // Fallback to REST API
-        console.log('📡 WebSocket unavailable, using REST API...');
+        console.log('WebSocket unavailable, using REST API...');
         const responseMsg = await messageApi.send(activeConversationId, ciphertext, iv);
         
-        // Mark this message as processed to avoid duplicate from WebSocket
         processedMessageIds.current.add(responseMsg.id);
         
         // Replace optimistic message with real one
@@ -347,21 +326,18 @@ const App: React.FC = () => {
             )
           };
         });
-        
-        console.log('✅ Message sent via REST API');
       }
 
     } catch (err) {
-      console.error("❌ Failed to send message:", err);
+      console.error("Failed to send message:", err);
       
-      // Mark message as failed
       setMessages(prev => {
         const list = prev[activeConversationId] || [];
         return {
           ...prev,
           [activeConversationId]: list.map(m => 
             m.id === tempId 
-              ? { ...m, text: `${m.text} ❌`, isSending: false, isFailed: true }
+              ? { ...m, text: `${m.text} (Failed)`, isSending: false }
               : m
           )
         };
@@ -371,8 +347,11 @@ const App: React.FC = () => {
     }
   };
 
+  const handlePlaceholderAction = (action: string) => {
+    alert(`${action} feature will be implemented later.`);
+  };
+
   const handleLogout = () => {
-    console.log('👋 Logging out...');
     socketService.deactivate();
     localStorage.removeItem(AUTH_TOKEN_KEY);
     localStorage.removeItem(LOGGED_IN_USER_KEY);
@@ -561,20 +540,40 @@ const App: React.FC = () => {
             </div>
 
             {/* Input Area */}
-            <div className="p-4 bg-white border-t border-gray-200">
-              <form onSubmit={handleSendMessage} className="flex gap-2 items-center">
-                <input
-                  type="text"
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  placeholder="Type a secure message..."
-                  className="flex-1 h-11 bg-gray-100 rounded-full px-5 text-sm focus:outline-none focus:ring-2 focus:ring-kapsel-primary/20 transition-all"
-                />
+            <div className="p-3 bg-white border-t border-gray-200">
+              <form onSubmit={handleSendMessage} className="flex gap-2 items-end">
+                <button 
+                  type="button" 
+                  onClick={() => handlePlaceholderAction('File attachment')}
+                  className="p-3 text-gray-400 hover:text-kapsel-primary hover:bg-gray-100 rounded-full transition-colors"
+                  title="Attach file"
+                >
+                  <Paperclip className="w-5 h-5" />
+                </button>
+                <button 
+                  type="button" 
+                  onClick={() => handlePlaceholderAction('Camera')}
+                  className="p-3 text-gray-400 hover:text-kapsel-primary hover:bg-gray-100 rounded-full transition-colors"
+                  title="Take photo"
+                >
+                  <Camera className="w-5 h-5" />
+                </button>
+                
+                <div className="flex-1 bg-gray-100 rounded-2xl flex items-center px-4 py-1 min-h-[44px]">
+                   <input
+                    type="text"
+                    value={inputText}
+                    onChange={(e) => setInputText(e.target.value)}
+                    placeholder="Type a secure message..."
+                    className="flex-1 bg-transparent text-sm focus:outline-none min-h-[24px] py-2"
+                  />
+                </div>
+                
                 <button
                   type="submit"
                   disabled={!inputText.trim()}
                   title="Send"
-                  className="w-11 h-11 flex items-center justify-center rounded-full bg-kapsel-primary text-white hover:bg-black disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  className="p-3 flex items-center justify-center rounded-full bg-kapsel-primary text-white hover:bg-black disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   <Send className="w-5 h-5 ml-0.5" />
                 </button>
