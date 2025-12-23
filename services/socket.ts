@@ -1,4 +1,4 @@
-import { Client, IMessage } from '@stomp/stompjs';
+import { Client, IMessage, StompSubscription } from '@stomp/stompjs';
 import SockJS from 'sockjs-client';
 import { WS_URL, AUTH_TOKEN_KEY } from '../constants';
 import { Message } from '../types';
@@ -8,8 +8,8 @@ type ConnectionStatusCallback = (isConnected: boolean) => void;
 
 class SocketService {
   private client: Client;
-  private subscriptions: Map<string, any> = new Map();
-  private messageCallbacks: Map<string, MessageCallback[]> = new Map();
+  private userSubscription: StompSubscription | null = null;
+  private messageCallback: MessageCallback | null = null;
   private statusCallbacks: Set<ConnectionStatusCallback> = new Set();
   private _isConnected: boolean = false;
   private reconnectAttempts: number = 0;
@@ -32,12 +32,7 @@ class SocketService {
         this._isConnected = true;
         this.reconnectAttempts = 0;
         this.notifyStatusChange(true);
-        
-        // Resubscribe to all conversations
-        // We iterate over the callbacks map because that tells us what the UI is interested in
-        this.messageCallbacks.forEach((_, conversationId) => {
-          this._doSubscribe(conversationId);
-        });
+        this._subscribeToUserQueue();
       },
 
       onDisconnect: () => {
@@ -47,39 +42,30 @@ class SocketService {
 
       onStompError: (frame) => {
         console.error('STOMP Error:', frame.headers['message']);
-        console.error('Details:', frame.body);
         this.handleDisconnect();
       },
 
-      onWebSocketClose: (event) => {
-        console.log('STOMP: WebSocket Closed', event);
+      onWebSocketClose: () => {
+        console.log('STOMP: WebSocket Closed');
         this.handleDisconnect();
         
-        // Attempt reconnection
         if (this.reconnectAttempts < this.maxReconnectAttempts) {
           this.reconnectAttempts++;
           console.log(`Attempting reconnection (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
         }
-      },
-
-      onWebSocketError: (error) => {
-        console.error('WebSocket Error:', error);
       }
     });
   }
 
-  // Centralized disconnect handling
   private handleDisconnect() {
     this._isConnected = false;
     this.notifyStatusChange(false);
-    
-    // CRITICAL FIX: Clear the subscription objects. 
-    // The server has dropped them, so we must re-request them on reconnect.
-    // We keep 'messageCallbacks' because the UI still wants those messages when we come back online.
-    this.subscriptions.forEach(sub => {
-        try { sub.unsubscribe(); } catch(e) { /* ignore */ }
-    });
-    this.subscriptions.clear();
+    if (this.userSubscription) {
+        try {
+            this.userSubscription.unsubscribe();
+        } catch (e) { /* ignore */ }
+    }
+    this.userSubscription = null;
   }
 
   get connected() {
@@ -92,6 +78,13 @@ class SocketService {
     return () => {
       this.statusCallbacks.delete(callback);
     };
+  }
+
+  /**
+   * Register a global handler for all incoming messages (user queue).
+   */
+  onMessage(callback: MessageCallback) {
+    this.messageCallback = callback;
   }
 
   private notifyStatusChange(isConnected: boolean) {
@@ -118,89 +111,42 @@ class SocketService {
 
   deactivate() {
     console.log('STOMP: Deactivating...');
-    this.subscriptions.forEach((sub, convId) => {
-      try {
-        sub.unsubscribe();
-      } catch (e) {
-        console.error(`Failed to unsubscribe from ${convId}:`, e);
-      }
-    });
-    this.subscriptions.clear();
-    this.messageCallbacks.clear();
+    this.handleDisconnect();
+    this.messageCallback = null;
     
     try {
       this.client.deactivate();
     } catch (error) {
       console.error('Failed to deactivate STOMP client:', error);
     }
-    
-    this._isConnected = false;
-    this.notifyStatusChange(false);
   }
 
-  subscribeToConversation(conversationId: string, callback: MessageCallback) {
-    if (!this.messageCallbacks.has(conversationId)) {
-      this.messageCallbacks.set(conversationId, []);
-    }
-    
-    const callbacks = this.messageCallbacks.get(conversationId)!;
-    if (!callbacks.includes(callback)) {
-      callbacks.push(callback);
-    }
-
-    // Subscribe immediately if connected
-    if (this._isConnected) {
-      this._doSubscribe(conversationId);
-    }
-  }
-
-  private _doSubscribe(conversationId: string) {
-    // If we already have a subscription object for this ID, check if it is still valid?
-    // Actually, due to the fix in handleDisconnect, if we are here, we probably need to subscribe.
-    if (this.subscriptions.has(conversationId)) {
+  /**
+   * Subscribes to the user-specific queue. 
+   * Backend sends to /user/{userId}/queue/messages, client subscribes to /user/queue/messages.
+   */
+  private _subscribeToUserQueue() {
+    if (this.userSubscription) {
       return;
     }
 
-    const destination = `/topic/conversations/${conversationId}`;
+    const destination = '/user/queue/messages';
     console.log(`STOMP: Subscribing to ${destination}`);
     
     try {
-      const sub = this.client.subscribe(destination, (message: IMessage) => {
+      this.userSubscription = this.client.subscribe(destination, (message: IMessage) => {
         try {
           const body: Message = JSON.parse(message.body);
-          
-          const callbacks = this.messageCallbacks.get(conversationId);
-          if (callbacks && callbacks.length > 0) {
-            callbacks.forEach(cb => {
-              try {
-                cb(body);
-              } catch (cbError) {
-                console.error('Callback error:', cbError);
-              }
-            });
+          if (this.messageCallback) {
+            this.messageCallback(body);
           }
         } catch (err) {
           console.error('STOMP: Failed to parse or handle message:', err);
         }
       });
-      
-      this.subscriptions.set(conversationId, sub);
     } catch (e) {
       console.error(`STOMP: Subscribe failed for ${destination}:`, e);
     }
-  }
-
-  unsubscribeFromConversation(conversationId: string) {
-    const sub = this.subscriptions.get(conversationId);
-    if (sub) {
-      try {
-        sub.unsubscribe();
-        this.subscriptions.delete(conversationId);
-      } catch (e) {
-        console.error(`Failed to unsubscribe from ${conversationId}:`, e);
-      }
-    }
-    this.messageCallbacks.delete(conversationId);
   }
 
   sendMessage(conversationId: string, senderId: string, ciphertext: string, iv: string): boolean {

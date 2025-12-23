@@ -57,45 +57,12 @@ const App: React.FC = () => {
   const processedMessageIds = useRef<Set<string>>(new Set());
   const isLoadingHistory = useRef<Set<string>>(new Set());
 
-  // Initialize Auth & Socket
-  useEffect(() => {
-    const token = localStorage.getItem(AUTH_TOKEN_KEY);
-    const storedUser = localStorage.getItem(LOGGED_IN_USER_KEY);
-    if (token && storedUser) {
-      const user = JSON.parse(storedUser);
-      setCurrentUser(user);
-      
-      console.log('Initializing socket connection for user:', user.id);
-      socketService.activate();
-      
-      const unsubscribe = socketService.onConnectionChange((isConnected) => {
-        console.log('Socket connection status changed:', isConnected);
-        setIsSocketConnected(isConnected);
-      });
-      
-      return () => {
-        unsubscribe();
-        socketService.deactivate();
-      };
-    }
-  }, []);
-
-  // Persist Active Conversation
-  useEffect(() => {
-    if (activeConversationId) {
-      localStorage.setItem(ACTIVE_CONVERSATION_KEY, activeConversationId);
-    } else {
-      localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
-    }
-  }, [activeConversationId]);
-
-  // Handle incoming WebSocket messages for ALL conversations
+  // Handle incoming WebSocket messages for ALL conversations (Global Handler)
   const handleRealtimeMessage = useCallback(async (msg: Message) => {
     console.log('Received realtime message:', msg);
     
     // Check if we've already processed this message
     if (processedMessageIds.current.has(msg.id)) {
-      // It might be an echo of our own message sent via REST fallback, or a duplicate broadcast
       return;
     }
     
@@ -132,22 +99,40 @@ const App: React.FC = () => {
     });
   }, []);
 
-  // Subscribe to ALL conversations
+  // Initialize Auth & Socket
   useEffect(() => {
-    if (!currentUser || conversations.length === 0 || !isSocketConnected) {
-      return;
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    const storedUser = localStorage.getItem(LOGGED_IN_USER_KEY);
+    if (token && storedUser) {
+      const user = JSON.parse(storedUser);
+      setCurrentUser(user);
+      
+      console.log('Initializing socket connection for user:', user.id);
+      
+      // Register the global message handler
+      socketService.onMessage(handleRealtimeMessage);
+      socketService.activate();
+      
+      const unsubscribe = socketService.onConnectionChange((isConnected) => {
+        console.log('Socket connection status changed:', isConnected);
+        setIsSocketConnected(isConnected);
+      });
+      
+      return () => {
+        unsubscribe();
+        socketService.deactivate();
+      };
     }
+  }, [handleRealtimeMessage]);
 
-    console.log(`Subscribing to ${conversations.length} conversation(s)`);
-    
-    conversations.forEach(conv => {
-      socketService.subscribeToConversation(conv.id, handleRealtimeMessage);
-    });
-
-    return () => {
-      // Optional: Cleanup if needed, but keeping subs active usually helps reconnection
-    };
-  }, [conversations, currentUser, isSocketConnected, handleRealtimeMessage]);
+  // Persist Active Conversation
+  useEffect(() => {
+    if (activeConversationId) {
+      localStorage.setItem(ACTIVE_CONVERSATION_KEY, activeConversationId);
+    } else {
+      localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
+    }
+  }, [activeConversationId]);
 
   // Load message history when conversation becomes active
   useEffect(() => {
@@ -301,7 +286,7 @@ const App: React.FC = () => {
       
       if (sentViaSocket) {
         // Remove the optimistic message after a delay
-        // The real message will come through WebSocket subscription
+        // The real message will come through WebSocket subscription (echoed back by backend to /user/queue/messages)
         setTimeout(() => {
           setMessages(prev => ({
             ...prev,
