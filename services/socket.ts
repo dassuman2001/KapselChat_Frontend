@@ -1,41 +1,48 @@
 import { Client, IMessage } from '@stomp/stompjs';
 import SockJS from 'sockjs-client';
-import { WS_URL } from '../constants';
+import { WS_URL, AUTH_TOKEN_KEY } from '../constants';
 import { Message } from '../types';
 
 type MessageCallback = (message: Message) => void;
+type ConnectionStatusCallback = (isConnected: boolean) => void;
 
 class SocketService {
   private client: Client;
   private subscriptions: Map<string, any> = new Map();
   private messageCallbacks: Map<string, MessageCallback[]> = new Map();
+  private statusCallbacks: Set<ConnectionStatusCallback> = new Set();
+  
+  // Track internal state to allow UI to query immediately
+  private _isConnected: boolean = false;
 
   constructor() {
     this.client = new Client({
-      // We purposefully do NOT set brokerURL when using webSocketFactory with SockJS
-      // to avoid protocol conflicts.
+      // Use SockJS
       webSocketFactory: () => new SockJS(WS_URL),
       
       reconnectDelay: 5000,
       heartbeatIncoming: 4000,
       heartbeatOutgoing: 4000,
       
-      // Add debug logging to console to trace STOMP traffic
+      // Debug logging
       debug: (str) => {
-        // Uncomment the line below if you want to see detailed STOMP frames in console
         // console.debug(str);
       },
 
       onConnect: () => {
         console.log('STOMP: Connected');
+        this._isConnected = true;
+        this.notifyStatusChange(true);
+        
         // Resubscribe to all conversations that have registered callbacks
-        // This ensures that if the connection dropped and came back, we re-establish logic
         this.messageCallbacks.forEach((_, conversationId) => {
           this._doSubscribe(conversationId);
         });
       },
       onDisconnect: () => {
         console.log('STOMP: Disconnected');
+        this._isConnected = false;
+        this.notifyStatusChange(false);
       },
       onStompError: (frame) => {
         console.error('STOMP: Broker reported error: ' + frame.headers['message']);
@@ -43,20 +50,51 @@ class SocketService {
       },
       onWebSocketClose: () => {
         console.log('STOMP: WebSocket Closed');
+        this._isConnected = false;
+        this.notifyStatusChange(false);
       }
     });
   }
 
   get connected() {
-    return this.client.connected;
+    return this._isConnected;
+  }
+
+  // Allow UI components to listen for connection changes
+  onConnectionChange(callback: ConnectionStatusCallback) {
+    this.statusCallbacks.add(callback);
+    // Immediately fire with current status
+    callback(this._isConnected);
+    return () => {
+      this.statusCallbacks.delete(callback);
+    };
+  }
+
+  private notifyStatusChange(isConnected: boolean) {
+    this.statusCallbacks.forEach(cb => cb(isConnected));
   }
 
   activate() {
+    // CRITICAL: Inject the JWT token into the headers before connecting.
+    // Without this, the backend will treat us as an anonymous user and likely
+    // ignore subscription requests to protected topics.
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (token) {
+      this.client.connectHeaders = {
+        Authorization: `Bearer ${token}`
+      };
+      console.log('STOMP: Activating with Auth Token');
+    } else {
+      console.warn('STOMP: Activating without Auth Token');
+    }
+
     this.client.activate();
   }
 
   deactivate() {
     this.client.deactivate();
+    this._isConnected = false;
+    this.notifyStatusChange(false);
   }
 
   subscribeToConversation(conversationId: string, callback: MessageCallback) {
@@ -69,15 +107,13 @@ class SocketService {
       callbacks.push(callback);
     }
 
-    // Try to subscribe immediately
-    if (this.client.connected) {
+    // Try to subscribe immediately if connected
+    if (this._isConnected) {
        this._doSubscribe(conversationId);
     } 
-    // If not connected, onConnect will handle it via the messageCallbacks map
   }
 
   private _doSubscribe(conversationId: string) {
-    // If we already have a STOMP subscription for this ID, don't create another one
     if (this.subscriptions.has(conversationId)) {
       return;
     }
@@ -104,6 +140,8 @@ class SocketService {
   }
 
   unsubscribeFromConversation(conversationId: string) {
+      // We don't remove the callback list immediately if we want to keep them for reconnection
+      // But typically we do:
       console.log(`STOMP: Unsubscribing from ${conversationId}`);
       const sub = this.subscriptions.get(conversationId);
       if (sub) {
@@ -114,7 +152,7 @@ class SocketService {
   }
 
   sendMessage(conversationId: string, senderId: string, ciphertext: string, iv: string): boolean {
-    if (this.client.connected) {
+    if (this._isConnected) {
       try {
         this.client.publish({
           destination: '/app/chat.sendMessage',

@@ -30,7 +30,9 @@ import {
   Search, 
   Menu,
   Lock,
-  ArrowLeft
+  ArrowLeft,
+  Wifi,
+  WifiOff
 } from 'lucide-react';
 import { format } from 'date-fns';
 
@@ -38,7 +40,6 @@ const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   
-  // Initialize from LocalStorage to persist state on reload
   const [activeConversationId, setActiveConversationId] = useState<string | null>(() => {
     return localStorage.getItem(ACTIVE_CONVERSATION_KEY);
   });
@@ -47,15 +48,29 @@ const App: React.FC = () => {
   const [inputText, setInputText] = useState('');
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(true); 
+  const [isSocketConnected, setIsSocketConnected] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Initialize Auth
+  // Track all conversations we need to monitor
+  const subscribedConversationsRef = useRef<Set<string>>(new Set());
+
+  // Initialize Auth & Socket
   useEffect(() => {
     const token = localStorage.getItem(AUTH_TOKEN_KEY);
     const storedUser = localStorage.getItem(LOGGED_IN_USER_KEY);
     if (token && storedUser) {
       setCurrentUser(JSON.parse(storedUser));
+      
       socketService.activate();
+      
+      const unsubscribe = socketService.onConnectionChange((isConnected) => {
+        setIsSocketConnected(isConnected);
+      });
+      
+      return () => {
+        unsubscribe();
+        socketService.deactivate();
+      };
     }
   }, []);
 
@@ -68,16 +83,16 @@ const App: React.FC = () => {
     }
   }, [activeConversationId]);
 
-  // Handle Subscription and History Fetching
+  // Subscribe to ALL conversations, not just active one
   useEffect(() => {
-    if (!activeConversationId || !currentUser) return;
+    if (!currentUser || conversations.length === 0) return;
 
-    const convId = activeConversationId;
-
-    // 1. Subscribe to Socket
+    // Handle realtime messages for ANY conversation
     const handleRealtimeMessage = async (msg: Message) => {
+      console.log('Received realtime message:', msg);
+      
       // Decrypt incoming real-time message
-      let decryptedText = '⚠️ Decryption Failed';
+      let decryptedText = 'Decryption Failed';
       try {
         decryptedText = await decryptMessage(msg.ciphertext, msg.iv);
       } catch (e) {
@@ -87,48 +102,91 @@ const App: React.FC = () => {
       const msgWithText = { ...msg, text: decryptedText };
       
       setMessages(prev => {
-        const currentList = prev[convId] || [];
-        // Dedup: Check if message ID already exists (e.g. from REST response)
-        if (currentList.some(m => m.id === msg.id)) {
-            return prev;
+        const currentList = prev[msg.conversationId] || [];
+        
+        // Better deduplication: check by timestamp and content
+        const isDuplicate = currentList.some(m => 
+          m.id === msg.id || 
+          (m.senderId === msg.senderId && 
+           m.ciphertext === msg.ciphertext && 
+           Math.abs(new Date(m.createdAt).getTime() - new Date(msg.createdAt).getTime()) < 1000)
+        );
+        
+        if (isDuplicate) {
+          console.log('Duplicate message detected, skipping');
+          return prev;
         }
+        
+        console.log('Adding new message to conversation:', msg.conversationId);
         return {
           ...prev,
-          [convId]: [...currentList, msgWithText]
+          [msg.conversationId]: [...currentList, msgWithText].sort((a, b) => 
+            new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+          )
         };
       });
     };
 
-    socketService.subscribeToConversation(convId, handleRealtimeMessage);
+    // Subscribe to ALL conversations
+    conversations.forEach(conv => {
+      if (!subscribedConversationsRef.current.has(conv.id)) {
+        console.log('Subscribing to conversation:', conv.id);
+        socketService.subscribeToConversation(conv.id, handleRealtimeMessage);
+        subscribedConversationsRef.current.add(conv.id);
+      }
+    });
 
-    // 2. Fetch History
+    // Cleanup: only unsubscribe from conversations that no longer exist
+    return () => {
+      const currentConvIds = new Set(conversations.map(c => c.id));
+      subscribedConversationsRef.current.forEach(convId => {
+        if (!currentConvIds.has(convId)) {
+          console.log('Unsubscribing from removed conversation:', convId);
+          socketService.unsubscribeFromConversation(convId);
+          subscribedConversationsRef.current.delete(convId);
+        }
+      });
+    };
+  }, [conversations, currentUser]);
+
+  // Load history only when conversation becomes active
+  useEffect(() => {
+    if (!activeConversationId || !currentUser) return;
+
     const loadHistory = async () => {
+      // Only load if we don't have messages for this conversation
+      if (messages[activeConversationId]?.length > 0) {
+        console.log('Messages already loaded for:', activeConversationId);
+        return;
+      }
+
       try {
-        const history = await messageApi.getForConversation(convId);
-        // Decrypt history
+        console.log('Loading history for:', activeConversationId);
+        const history = await messageApi.getForConversation(activeConversationId);
+        
         const decryptedHistory = await Promise.all(history.map(async (m) => {
-            let text = '⚠️ Decryption Failed';
-            try {
-              text = await decryptMessage(m.ciphertext, m.iv);
-            } catch (e) { console.error(e); }
-            return { ...m, text };
+          let text = 'Decryption Failed';
+          try {
+            text = await decryptMessage(m.ciphertext, m.iv);
+          } catch (e) { 
+            console.error('Decryption error:', e); 
+          }
+          return { ...m, text };
         }));
-        setMessages(prev => ({ ...prev, [convId]: decryptedHistory }));
+        
+        setMessages(prev => ({ 
+          ...prev, 
+          [activeConversationId]: decryptedHistory.sort((a, b) => 
+            new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+          )
+        }));
       } catch (err) {
         console.error("Failed to load history", err);
       }
     };
 
-    // Only load history if we don't have it (or to refresh it)
-    // We reload it here to ensure we get missed messages if we refreshed
     loadHistory();
-
-    return () => {
-      // Cleanup subscription when switching conversations
-      socketService.unsubscribeFromConversation(convId);
-    };
   }, [activeConversationId, currentUser]);
-
 
   // Fetch Conversations and Cache
   const fetchConversations = useCallback(async () => {
@@ -136,13 +194,11 @@ const App: React.FC = () => {
     try {
       const convs = await conversationApi.getAll();
       
-      // Resolve user details from cache
       const cacheStr = localStorage.getItem(USER_CACHE_KEY);
       const cache = cacheStr ? JSON.parse(cacheStr) : {};
       const missingUserIds = new Set<string>();
       
       let resolvedConvs = convs.map(c => {
-        // Find the other user ID
         const otherId = c.participantIds.find(id => id !== currentUser.id);
         const otherUser = otherId ? cache[otherId] : undefined;
         
@@ -155,10 +211,8 @@ const App: React.FC = () => {
       
       setConversations(resolvedConvs);
 
-      // Fetch missing users
       if (missingUserIds.size > 0) {
         try {
-          // Fetch all missing users in parallel
           const fetchedUsers = await Promise.all(
             Array.from(missingUserIds).map(id => userApi.getUser(id).catch(() => null))
           );
@@ -173,7 +227,6 @@ const App: React.FC = () => {
 
           if (cacheUpdated) {
             localStorage.setItem(USER_CACHE_KEY, JSON.stringify(cache));
-            // Update the conversations state with newly fetched users
             resolvedConvs = convs.map(c => {
               const otherId = c.participantIds.find(id => id !== currentUser.id);
               const otherUser = otherId ? cache[otherId] : undefined;
@@ -197,10 +250,9 @@ const App: React.FC = () => {
     }
   }, [currentUser, fetchConversations]);
 
-  // Just switch state, the Effect handles the networking
   const handleSelectConversation = (convId: string) => {
     setActiveConversationId(convId);
-    setIsMobileMenuOpen(false); // Close menu on mobile
+    setIsMobileMenuOpen(false);
   };
 
   const handleSendMessage = async (e: React.FormEvent) => {
@@ -208,15 +260,13 @@ const App: React.FC = () => {
     if (!activeConversationId || !currentUser || !inputText.trim()) return;
 
     const textToSend = inputText.trim();
-    setInputText(''); // Optimistic clear
+    setInputText('');
 
-    const tempId = `temp-${Date.now()}`;
+    const tempId = `temp-${Date.now()}-${Math.random()}`;
 
     try {
-      // 1. Encrypt
       const { ciphertext, iv } = await encryptMessage(textToSend);
 
-      // Optimistic Update
       const optimisticMsg: Message = {
         id: tempId,
         conversationId: activeConversationId,
@@ -235,15 +285,22 @@ const App: React.FC = () => {
         [activeConversationId]: [...(prev[activeConversationId] || []), optimisticMsg]
       }));
 
-      // 2. Try Socket First
+      // Try Socket First
       const sentViaSocket = socketService.sendMessage(activeConversationId, currentUser.id, ciphertext, iv);
       
-      if (!sentViaSocket) {
-        // 3. Fallback to REST
-        console.log("Socket not connected, using REST fallback...");
+      if (sentViaSocket) {
+        console.log('Message sent via WebSocket');
+        // Remove the optimistic message - the real one will come via WebSocket
+        setTimeout(() => {
+          setMessages(prev => ({
+            ...prev,
+            [activeConversationId]: prev[activeConversationId].filter(m => m.id !== tempId)
+          }));
+        }, 1000);
+      } else {
+        console.log('Socket not connected, using REST fallback...');
         const responseMsg = await messageApi.send(activeConversationId, ciphertext, iv);
         
-        // Update the optimistic message with real data and remove isSending
         setMessages(prev => {
           const list = prev[activeConversationId] || [];
           return {
@@ -259,17 +316,16 @@ const App: React.FC = () => {
 
     } catch (err) {
       console.error("Failed to send message", err);
-      // Mark as failed in UI
       setMessages(prev => {
-          const list = prev[activeConversationId] || [];
-          return {
-            ...prev,
-            [activeConversationId]: list.map(m => 
-              m.id === tempId 
-                ? { ...m, text: `${m.text} (Failed)`, isSending: undefined } // Simplified error state
-                : m
-            )
-          };
+        const list = prev[activeConversationId] || [];
+        return {
+          ...prev,
+          [activeConversationId]: list.map(m => 
+            m.id === tempId 
+              ? { ...m, text: `${m.text} (Failed)`, isSending: undefined }
+              : m
+          )
+        };
       });
       alert("Failed to send message. Please check your connection.");
     }
@@ -296,7 +352,6 @@ const App: React.FC = () => {
   if (!currentUser) {
     return <Auth onAuthSuccess={(user) => {
       setCurrentUser(user);
-      socketService.activate();
     }} />;
   }
 
@@ -316,18 +371,24 @@ const App: React.FC = () => {
         {/* Sidebar Header */}
         <div className="h-16 px-4 flex items-center justify-between border-b border-gray-200 bg-white">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-full bg-kapsel-primary flex items-center justify-center text-white font-bold">
+            <div className="w-8 h-8 rounded-full bg-kapsel-primary flex items-center justify-center text-white font-bold relative">
               {currentUser.avatarUrl ? (
                 <img src={currentUser.avatarUrl} alt="Avatar" className="w-8 h-8 rounded-full" />
               ) : (
                 currentUser.displayName.charAt(0).toUpperCase()
               )}
+              <div className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${isSocketConnected ? 'bg-green-500' : 'bg-red-500'}`} title={isSocketConnected ? 'Online' : 'Disconnected'} />
             </div>
-            <span className="font-semibold text-gray-900 truncate max-w-[120px]">
-              {currentUser.displayName}
-            </span>
+            <div className="flex flex-col">
+              <span className="font-semibold text-gray-900 truncate max-w-[100px] text-sm leading-tight">
+                {currentUser.displayName}
+              </span>
+              <span className={`text-[10px] font-medium ${isSocketConnected ? 'text-green-600' : 'text-red-500'}`}>
+                {isSocketConnected ? 'Online' : 'Offline'}
+              </span>
+            </div>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-1">
             <button 
               onClick={() => setShowNewChatModal(true)}
               className="p-2 text-gray-500 hover:text-kapsel-primary hover:bg-gray-100 rounded-lg transition-colors"
@@ -442,7 +503,7 @@ const App: React.FC = () => {
                         }
                       `}
                     >
-                      <p className="whitespace-pre-wrap break-words">{msg.text || '🔒 Decrypting...'}</p>
+                      <p className="whitespace-pre-wrap break-words">{msg.text || 'Decryption Failed'}</p>
                       <div className={`text-[10px] mt-1 text-right ${isMe ? 'text-gray-300' : 'text-gray-400'}`}>
                         {msg.createdAt && !msg.id.startsWith('temp') 
                           ? format(new Date(msg.createdAt), 'HH:mm') 
@@ -468,6 +529,7 @@ const App: React.FC = () => {
                 <button
                   type="submit"
                   disabled={!inputText.trim()}
+                  title="Send"
                   className="w-11 h-11 flex items-center justify-center rounded-full bg-kapsel-primary text-white hover:bg-black disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   <Send className="w-5 h-5 ml-0.5" />
@@ -493,8 +555,8 @@ const App: React.FC = () => {
         <NewChatModal 
           onClose={() => setShowNewChatModal(false)} 
           onChatCreated={(conv) => {
-            fetchConversations(); // Refresh list
-            handleSelectConversation(conv.id); // Open it
+            fetchConversations();
+            handleSelectConversation(conv.id);
           }}
           currentUserMobile={currentUser.mobileNumber}
         />
