@@ -8,42 +8,47 @@ type MessageCallback = (message: Message) => void;
 class SocketService {
   private client: Client;
   private subscriptions: Map<string, any> = new Map();
-  private _isConnected: boolean = false;
   private messageCallbacks: Map<string, MessageCallback[]> = new Map();
 
   constructor() {
     this.client = new Client({
-      brokerURL: WS_URL.replace('http', 'ws'), // e.g. ws://localhost:8080/ws
+      // We purposefully do NOT set brokerURL when using webSocketFactory with SockJS
+      // to avoid protocol conflicts.
+      webSocketFactory: () => new SockJS(WS_URL),
+      
       reconnectDelay: 5000,
       heartbeatIncoming: 4000,
       heartbeatOutgoing: 4000,
-      // SockJS fallback for browsers/environments that need it or if raw WS fails
-      webSocketFactory: () => new SockJS(WS_URL),
+      
+      // Add debug logging to console to trace STOMP traffic
+      debug: (str) => {
+        // Uncomment the line below if you want to see detailed STOMP frames in console
+        // console.debug(str);
+      },
+
       onConnect: () => {
-        console.log('STOMP Connected');
-        this._isConnected = true;
+        console.log('STOMP: Connected');
         // Resubscribe to all conversations that have registered callbacks
-        // This fixes the issue where subscriptions requested before connection were lost
+        // This ensures that if the connection dropped and came back, we re-establish logic
         this.messageCallbacks.forEach((_, conversationId) => {
           this._doSubscribe(conversationId);
         });
       },
       onDisconnect: () => {
-        console.log('STOMP Disconnected');
-        this._isConnected = false;
+        console.log('STOMP: Disconnected');
       },
       onStompError: (frame) => {
-        console.error('Broker reported error: ' + frame.headers['message']);
-        console.error('Additional details: ' + frame.body);
+        console.error('STOMP: Broker reported error: ' + frame.headers['message']);
+        console.error('STOMP: Additional details: ' + frame.body);
       },
       onWebSocketClose: () => {
-        this._isConnected = false;
+        console.log('STOMP: WebSocket Closed');
       }
     });
   }
 
   get connected() {
-    return this._isConnected;
+    return this.client.connected;
   }
 
   activate() {
@@ -52,43 +57,54 @@ class SocketService {
 
   deactivate() {
     this.client.deactivate();
-    this._isConnected = false;
   }
 
   subscribeToConversation(conversationId: string, callback: MessageCallback) {
     if (!this.messageCallbacks.has(conversationId)) {
       this.messageCallbacks.set(conversationId, []);
     }
-    // Prevent duplicate callbacks if strict mode or re-renders cause double subscription
+    
     const callbacks = this.messageCallbacks.get(conversationId)!;
     if (!callbacks.includes(callback)) {
       callbacks.push(callback);
     }
 
-    if (this._isConnected) {
+    // Try to subscribe immediately
+    if (this.client.connected) {
        this._doSubscribe(conversationId);
     } 
-    // If not connected, onConnect will look at messageCallbacks and subscribe then.
+    // If not connected, onConnect will handle it via the messageCallbacks map
   }
 
   private _doSubscribe(conversationId: string) {
-    // Avoid creating duplicate STOMP subscriptions for the same topic
+    // If we already have a STOMP subscription for this ID, don't create another one
     if (this.subscriptions.has(conversationId)) {
       return;
     }
 
-    console.log(`Subscribing to /topic/conversations/${conversationId}`);
-    const sub = this.client.subscribe(`/topic/conversations/${conversationId}`, (message: IMessage) => {
-        const body: Message = JSON.parse(message.body);
-        const callbacks = this.messageCallbacks.get(conversationId);
-        if (callbacks) {
-            callbacks.forEach(cb => cb(body));
-        }
-    });
-    this.subscriptions.set(conversationId, sub);
+    console.log(`STOMP: Subscribing to topic /topic/conversations/${conversationId}`);
+    
+    try {
+      const sub = this.client.subscribe(`/topic/conversations/${conversationId}`, (message: IMessage) => {
+          try {
+            console.log('STOMP: Received message', message.body);
+            const body: Message = JSON.parse(message.body);
+            const callbacks = this.messageCallbacks.get(conversationId);
+            if (callbacks) {
+                callbacks.forEach(cb => cb(body));
+            }
+          } catch (err) {
+            console.error('STOMP: Failed to parse or handle message', err);
+          }
+      });
+      this.subscriptions.set(conversationId, sub);
+    } catch (e) {
+      console.error('STOMP: Subscribe failed', e);
+    }
   }
 
   unsubscribeFromConversation(conversationId: string) {
+      console.log(`STOMP: Unsubscribing from ${conversationId}`);
       const sub = this.subscriptions.get(conversationId);
       if (sub) {
           sub.unsubscribe();
@@ -98,7 +114,7 @@ class SocketService {
   }
 
   sendMessage(conversationId: string, senderId: string, ciphertext: string, iv: string): boolean {
-    if (this._isConnected && this.client.connected) {
+    if (this.client.connected) {
       try {
         this.client.publish({
           destination: '/app/chat.sendMessage',
@@ -111,11 +127,11 @@ class SocketService {
         });
         return true;
       } catch (e) {
-        console.error("Socket publish failed", e);
+        console.error("STOMP: Publish failed", e);
         return false;
       }
     } else {
-      console.warn('Socket not connected, client should fall back to REST');
+      console.warn('STOMP: Not connected, cannot send via socket');
       return false;
     }
   }
