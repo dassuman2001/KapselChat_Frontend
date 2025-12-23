@@ -8,8 +8,8 @@ type ConnectionStatusCallback = (isConnected: boolean) => void;
 
 class SocketService {
   private client: Client;
-  private subscriptions: Map<string, StompSubscription> = new Map();
-  private callbacks: Map<string, MessageCallback> = new Map();
+  private userSubscription: StompSubscription | null = null;
+  private messageCallback: MessageCallback | null = null;
   private statusCallbacks: Set<ConnectionStatusCallback> = new Set();
   private _isConnected: boolean = false;
   private reconnectAttempts: number = 0;
@@ -32,7 +32,7 @@ class SocketService {
         this._isConnected = true;
         this.reconnectAttempts = 0;
         this.notifyStatusChange(true);
-        this.resubscribe();
+        this._subscribeToUserQueue();
       },
 
       onDisconnect: () => {
@@ -60,9 +60,12 @@ class SocketService {
   private handleDisconnect() {
     this._isConnected = false;
     this.notifyStatusChange(false);
-    // Clear actual STOMP subscription objects, but keep the callbacks 
-    // so we can resubscribe when we reconnect.
-    this.subscriptions.clear();
+    if (this.userSubscription) {
+        try {
+            this.userSubscription.unsubscribe();
+        } catch (e) { /* ignore */ }
+    }
+    this.userSubscription = null;
   }
 
   get connected() {
@@ -75,6 +78,13 @@ class SocketService {
     return () => {
       this.statusCallbacks.delete(callback);
     };
+  }
+
+  /**
+   * Register a global handler for all incoming messages (user queue).
+   */
+  onMessage(callback: MessageCallback) {
+    this.messageCallback = callback;
   }
 
   private notifyStatusChange(isConnected: boolean) {
@@ -102,7 +112,7 @@ class SocketService {
   deactivate() {
     console.log('STOMP: Deactivating...');
     this.handleDisconnect();
-    this.callbacks.clear();
+    this.messageCallback = null;
     
     try {
       this.client.deactivate();
@@ -112,63 +122,33 @@ class SocketService {
   }
 
   /**
-   * Subscribe to a specific destination (topic).
-   * Stores the callback to handle reconnections automatically.
+   * Subscribes to the user-specific queue. 
+   * Backend sends to /user/{userId}/queue/messages, client subscribes to /user/queue/messages.
    */
-  subscribe(destination: string, callback: MessageCallback) {
-    // Store the callback
-    this.callbacks.set(destination, callback);
-    
-    // If already connected, perform the STOMP subscription immediately
-    if (this._isConnected) {
-      this.doSubscribe(destination, callback);
-    }
-  }
-
-  /**
-   * Unsubscribe from a destination.
-   */
-  unsubscribe(destination: string) {
-    const sub = this.subscriptions.get(destination);
-    if (sub) {
-      try {
-        sub.unsubscribe();
-      } catch (e) {
-        console.warn(`Failed to unsubscribe from ${destination}`, e);
-      }
-      this.subscriptions.delete(destination);
-    }
-    this.callbacks.delete(destination);
-  }
-
-  private doSubscribe(destination: string, callback: MessageCallback) {
-    // Prevent duplicate subscriptions to the same topic
-    if (this.subscriptions.has(destination)) {
-        return;
+  private _subscribeToUserQueue() {
+    if (this.userSubscription) {
+      return;
     }
 
+    // CRITICAL: Subscribe EXACTLY to /user/queue/messages per requirements
+    const destination = '/user/queue/messages';
     console.log(`STOMP: Subscribing to ${destination}`);
     
     try {
-      const sub = this.client.subscribe(destination, (message: IMessage) => {
+      this.userSubscription = this.client.subscribe(destination, (message: IMessage) => {
         try {
+          console.log('STOMP: Message received from queue:', message.body);
           const body: Message = JSON.parse(message.body);
-          callback(body);
+          if (this.messageCallback) {
+            this.messageCallback(body);
+          }
         } catch (err) {
           console.error('STOMP: Failed to parse or handle message:', err);
         }
       });
-      this.subscriptions.set(destination, sub);
     } catch (e) {
       console.error(`STOMP: Subscribe failed for ${destination}:`, e);
     }
-  }
-
-  private resubscribe() {
-    console.log('STOMP: Resubscribing to active topics...');
-    this.callbacks.forEach((cb, destination) => {
-      this.doSubscribe(destination, cb);
-    });
   }
 
   sendMessage(conversationId: string, senderId: string, ciphertext: string, iv: string): boolean {

@@ -57,7 +57,7 @@ const App: React.FC = () => {
   const processedMessageIds = useRef<Set<string>>(new Set());
   const isLoadingHistory = useRef<Set<string>>(new Set());
 
-  // Handle incoming WebSocket messages
+  // Handle incoming WebSocket messages (Global Handler for /user/queue/messages)
   const handleRealtimeMessage = useCallback(async (msg: Message) => {
     console.log('Received realtime message:', msg);
     
@@ -99,7 +99,7 @@ const App: React.FC = () => {
     });
   }, []);
 
-  // Initialize Auth & Socket Connection (Connection Only)
+  // Initialize Auth & Socket
   useEffect(() => {
     const token = localStorage.getItem(AUTH_TOKEN_KEY);
     const storedUser = localStorage.getItem(LOGGED_IN_USER_KEY);
@@ -108,6 +108,9 @@ const App: React.FC = () => {
       setCurrentUser(user);
       
       console.log('Initializing socket connection for user:', user.id);
+      
+      // Register the global message handler before activating
+      socketService.onMessage(handleRealtimeMessage);
       socketService.activate();
       
       const unsubscribe = socketService.onConnectionChange((isConnected) => {
@@ -120,24 +123,7 @@ const App: React.FC = () => {
         socketService.deactivate();
       };
     }
-  }, []);
-
-  // Manage Subscription based on Active Conversation
-  useEffect(() => {
-    if (activeConversationId && isSocketConnected) {
-      const topic = `/topic/conversations/${activeConversationId}`;
-      console.log('Subscribing to active conversation topic:', topic);
-      
-      // Subscribe to the topic
-      socketService.subscribe(topic, handleRealtimeMessage);
-
-      // Unsubscribe when switching conversation or unmounting
-      return () => {
-        console.log('Unsubscribing from:', topic);
-        socketService.unsubscribe(topic);
-      };
-    }
-  }, [activeConversationId, isSocketConnected, handleRealtimeMessage]);
+  }, [handleRealtimeMessage]);
 
   // Persist Active Conversation
   useEffect(() => {
@@ -300,7 +286,7 @@ const App: React.FC = () => {
       
       if (sentViaSocket) {
         // Remove the optimistic message after a delay
-        // The real message will come through WebSocket subscription (echoed back by backend to /topic/conversations/ID)
+        // The real message will come through WebSocket subscription (echoed back by backend to /user/queue/messages)
         setTimeout(() => {
           setMessages(prev => ({
             ...prev,
