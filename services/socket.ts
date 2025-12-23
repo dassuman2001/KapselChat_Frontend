@@ -22,8 +22,9 @@ class SocketService {
       onConnect: () => {
         console.log('STOMP Connected');
         this._isConnected = true;
-        // Resubscribe to active topics if connection was lost
-        this.subscriptions.forEach((_, conversationId) => {
+        // Resubscribe to all conversations that have registered callbacks
+        // This fixes the issue where subscriptions requested before connection were lost
+        this.messageCallbacks.forEach((_, conversationId) => {
           this._doSubscribe(conversationId);
         });
       },
@@ -58,20 +59,25 @@ class SocketService {
     if (!this.messageCallbacks.has(conversationId)) {
       this.messageCallbacks.set(conversationId, []);
     }
-    this.messageCallbacks.get(conversationId)?.push(callback);
+    // Prevent duplicate callbacks if strict mode or re-renders cause double subscription
+    const callbacks = this.messageCallbacks.get(conversationId)!;
+    if (!callbacks.includes(callback)) {
+      callbacks.push(callback);
+    }
 
     if (this._isConnected) {
        this._doSubscribe(conversationId);
     } 
-    // If not connected, onConnect will handle subscription
+    // If not connected, onConnect will look at messageCallbacks and subscribe then.
   }
 
   private _doSubscribe(conversationId: string) {
-    // Avoid double subscription
+    // Avoid creating duplicate STOMP subscriptions for the same topic
     if (this.subscriptions.has(conversationId)) {
-      this.subscriptions.get(conversationId).unsubscribe();
+      return;
     }
 
+    console.log(`Subscribing to /topic/conversations/${conversationId}`);
     const sub = this.client.subscribe(`/topic/conversations/${conversationId}`, (message: IMessage) => {
         const body: Message = JSON.parse(message.body);
         const callbacks = this.messageCallbacks.get(conversationId);

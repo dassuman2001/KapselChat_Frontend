@@ -19,7 +19,8 @@ import {
 import { 
   AUTH_TOKEN_KEY, 
   LOGGED_IN_USER_KEY, 
-  USER_CACHE_KEY 
+  USER_CACHE_KEY,
+  ACTIVE_CONVERSATION_KEY
 } from './constants';
 import { 
   MessageSquare, 
@@ -36,11 +37,16 @@ import { format } from 'date-fns';
 const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  
+  // Initialize from LocalStorage to persist state on reload
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(() => {
+    return localStorage.getItem(ACTIVE_CONVERSATION_KEY);
+  });
+  
   const [messages, setMessages] = useState<Record<string, Message[]>>({});
   const [inputText, setInputText] = useState('');
   const [showNewChatModal, setShowNewChatModal] = useState(false);
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(true); // For mobile responsiveness
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(true); 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Initialize Auth
@@ -52,6 +58,77 @@ const App: React.FC = () => {
       socketService.activate();
     }
   }, []);
+
+  // Persist Active Conversation
+  useEffect(() => {
+    if (activeConversationId) {
+      localStorage.setItem(ACTIVE_CONVERSATION_KEY, activeConversationId);
+    } else {
+      localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
+    }
+  }, [activeConversationId]);
+
+  // Handle Subscription and History Fetching
+  useEffect(() => {
+    if (!activeConversationId || !currentUser) return;
+
+    const convId = activeConversationId;
+
+    // 1. Subscribe to Socket
+    const handleRealtimeMessage = async (msg: Message) => {
+      // Decrypt incoming real-time message
+      let decryptedText = '⚠️ Decryption Failed';
+      try {
+        decryptedText = await decryptMessage(msg.ciphertext, msg.iv);
+      } catch (e) {
+        console.error("Failed to decrypt realtime message", e);
+      }
+      
+      const msgWithText = { ...msg, text: decryptedText };
+      
+      setMessages(prev => {
+        const currentList = prev[convId] || [];
+        // Dedup: Check if message ID already exists (e.g. from REST response)
+        if (currentList.some(m => m.id === msg.id)) {
+            return prev;
+        }
+        return {
+          ...prev,
+          [convId]: [...currentList, msgWithText]
+        };
+      });
+    };
+
+    socketService.subscribeToConversation(convId, handleRealtimeMessage);
+
+    // 2. Fetch History
+    const loadHistory = async () => {
+      try {
+        const history = await messageApi.getForConversation(convId);
+        // Decrypt history
+        const decryptedHistory = await Promise.all(history.map(async (m) => {
+            let text = '⚠️ Decryption Failed';
+            try {
+              text = await decryptMessage(m.ciphertext, m.iv);
+            } catch (e) { console.error(e); }
+            return { ...m, text };
+        }));
+        setMessages(prev => ({ ...prev, [convId]: decryptedHistory }));
+      } catch (err) {
+        console.error("Failed to load history", err);
+      }
+    };
+
+    // Only load history if we don't have it (or to refresh it)
+    // We reload it here to ensure we get missed messages if we refreshed
+    loadHistory();
+
+    return () => {
+      // Cleanup subscription when switching conversations
+      socketService.unsubscribeFromConversation(convId);
+    };
+  }, [activeConversationId, currentUser]);
+
 
   // Fetch Conversations and Cache
   const fetchConversations = useCallback(async () => {
@@ -120,46 +197,10 @@ const App: React.FC = () => {
     }
   }, [currentUser, fetchConversations]);
 
-  // Handle active conversation selection
-  const handleSelectConversation = async (convId: string) => {
+  // Just switch state, the Effect handles the networking
+  const handleSelectConversation = (convId: string) => {
     setActiveConversationId(convId);
     setIsMobileMenuOpen(false); // Close menu on mobile
-    
-    // Subscribe to socket if not already
-    socketService.subscribeToConversation(convId, async (msg) => {
-      // Decrypt incoming real-time message
-      const decryptedText = await decryptMessage(msg.ciphertext, msg.iv);
-      const msgWithText = { ...msg, text: decryptedText };
-      
-      setMessages(prev => {
-        const currentList = prev[convId] || [];
-        // Dedup: Check if message ID already exists (e.g. from REST response)
-        if (currentList.some(m => m.id === msg.id)) {
-            return prev;
-        }
-        return {
-          ...prev,
-          [convId]: [...currentList, msgWithText]
-        };
-      });
-    });
-
-    // Fetch history
-    if (!messages[convId]) {
-      try {
-        const history = await messageApi.getForConversation(convId);
-        // Decrypt history
-        const decryptedHistory = await Promise.all(history.map(async (m) => {
-            return {
-                ...m,
-                text: await decryptMessage(m.ciphertext, m.iv)
-            };
-        }));
-        setMessages(prev => ({ ...prev, [convId]: decryptedHistory }));
-      } catch (err) {
-        console.error("Failed to load history", err);
-      }
-    }
   };
 
   const handleSendMessage = async (e: React.FormEvent) => {
@@ -238,6 +279,7 @@ const App: React.FC = () => {
     socketService.deactivate();
     localStorage.removeItem(AUTH_TOKEN_KEY);
     localStorage.removeItem(LOGGED_IN_USER_KEY);
+    localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
     setCurrentUser(null);
     setConversations([]);
     setMessages({});
