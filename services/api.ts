@@ -6,6 +6,8 @@ const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
+    // Essential for Ngrok free tier: bypasses the "Visit Site" warning page
+    'ngrok-skip-browser-warning': 'true',
   },
 });
 
