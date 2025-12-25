@@ -23,9 +23,12 @@ import {
   Lock,
   ArrowLeft,
   Paperclip,
-  Camera
+  Camera,
+  MoreVertical,
+  Check,
+  CheckCheck
 } from 'lucide-react';
-import { format } from 'date-fns';
+import { format, isToday, isYesterday } from 'date-fns';
 import { Button } from './components/Button';
 
 const App: React.FC = () => {
@@ -39,7 +42,11 @@ const App: React.FC = () => {
   const [messages, setMessages] = useState<Record<string, Message[]>>({});
   const [inputText, setInputText] = useState('');
   const [showNewChatModal, setShowNewChatModal] = useState(false);
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(true); 
+  
+  // Mobile Menu State
+  // Default: Open if no chat selected, Closed if chat selected (on mobile)
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(!activeConversationId);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Track processed message IDs to prevent duplicates
@@ -105,10 +112,6 @@ const App: React.FC = () => {
         });
       });
     }
-
-    // 8. Never re-subscribe or deactivate on unmount of App unless strictly logging out
-    // We intentionally leave the cleanup empty for the socket persistence during hot-reloads 
-    // or navigation, unless the user explicitly Logs Out.
   }, []); // Empty dependency array []
 
   // Persist Active Conversation
@@ -216,7 +219,14 @@ const App: React.FC = () => {
 
   const handleSelectConversation = (convId: string) => {
     setActiveConversationId(convId);
-    setIsMobileMenuOpen(false);
+    setIsMobileMenuOpen(false); // Close menu on mobile
+  };
+
+  const handleBackToMenu = () => {
+    setIsMobileMenuOpen(true);
+    // Optional: setActiveConversationId(null) if we want to "close" the chat logic-wise
+    // But keeping it selected allows returning to the same state. 
+    // Usually, back button just shows the list.
   };
 
   const handleSendMessage = async (e: React.FormEvent) => {
@@ -257,10 +267,6 @@ const App: React.FC = () => {
       const sentViaSocket = socketService.sendMessage(activeConversationId, currentUser.id, ciphertext, iv);
       
       if (sentViaSocket) {
-        // We rely on the server echo (via subscription) to confirm the message.
-        // We can remove the optimistic message after a short delay or when the real one arrives.
-        // For simplicity, we just leave it until the real one replaces it or we refresh.
-        // In a perfect system, we'd reconcile the temporary ID with the real ID.
         setTimeout(() => {
           setMessages(prev => {
              const copy = structuredClone(prev);
@@ -269,7 +275,7 @@ const App: React.FC = () => {
              }
              return copy;
           });
-        }, 2000); // Remove temp message after 2s, assuming real one arrived
+        }, 3000); 
       } else {
         // Fallback to REST
         const responseMsg = await messageApi.send(activeConversationId, ciphertext, iv);
@@ -309,19 +315,24 @@ const App: React.FC = () => {
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, activeConversationId]);
+  }, [messages, activeConversationId, isMobileMenuOpen]);
+
+  const formatMessageTime = (dateStr: string) => {
+    const date = new Date(dateStr);
+    return format(date, 'h:mm a'); 
+  };
+  
+  const getInitials = (name?: string) => {
+    return (name || '?').charAt(0).toUpperCase();
+  };
 
   if (!currentUser) {
     return <Auth onAuthSuccess={(user) => {
       setCurrentUser(user);
-      // Trigger socket init immediately after login
       const token = localStorage.getItem(AUTH_TOKEN_KEY);
       if (token) {
          socketService.init(token);
-         // We need to re-attach listener because the initial useEffect might have run before login
-         // Ideally, we force a re-mount of App or handle this better, 
-         // but simply calling init again is safe due to checks inside init.
-         window.location.reload(); // Simplest way to ensure clean state on login for this architecture
+         window.location.reload(); 
       }
     }} />;
   }
@@ -330,124 +341,233 @@ const App: React.FC = () => {
   const activeMessages = activeConversationId ? messages[activeConversationId] || [] : [];
 
   return (
-    <div className="flex h-screen overflow-hidden bg-white">
-      {/* Sidebar */}
+    <div className="flex h-screen overflow-hidden bg-gray-100">
+      {/* Sidebar - Responsive */}
       <aside 
         className={`
-          fixed inset-y-0 left-0 z-40 w-full md:w-80 bg-gray-50 border-r border-gray-200 transform transition-transform duration-200 ease-in-out
-          ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
-          flex flex-col
+          fixed inset-y-0 left-0 z-50 w-full md:w-80 bg-white border-r border-gray-200 
+          transform transition-transform duration-300 ease-in-out md:translate-x-0 md:static
+          ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}
+          flex flex-col shadow-xl md:shadow-none
         `}
       >
-        <div className="h-16 px-4 flex items-center justify-between border-b border-gray-200 bg-white">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-full bg-kapsel-primary flex items-center justify-center text-white font-bold">
-               {currentUser.displayName.charAt(0).toUpperCase()}
+        {/* Sidebar Header */}
+        <div className="h-16 px-4 flex items-center justify-between border-b border-gray-100 bg-white shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="relative">
+              <div className="w-9 h-9 rounded-full bg-kapsel-primary flex items-center justify-center text-white font-bold shadow-sm">
+                 {getInitials(currentUser.displayName)}
+              </div>
+              <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-white"></div>
             </div>
-            <span className="font-semibold text-gray-900 truncate max-w-[100px] text-sm">
+            <span className="font-semibold text-gray-900 truncate max-w-[120px] text-sm">
                {currentUser.displayName}
             </span>
           </div>
           <div className="flex gap-1">
-            <button onClick={() => setShowNewChatModal(true)} className="p-2 hover:bg-gray-100 rounded-lg">
-              <Plus className="w-5 h-5 text-gray-500" />
+            <button onClick={() => setShowNewChatModal(true)} className="p-2 hover:bg-gray-100 rounded-full transition-colors text-gray-600" title="New Chat">
+              <Plus className="w-5 h-5" />
             </button>
-            <button onClick={handleLogout} className="p-2 hover:bg-red-50 rounded-lg">
-              <LogOut className="w-5 h-5 text-gray-500 hover:text-red-600" />
+            <button onClick={handleLogout} className="p-2 hover:bg-red-50 hover:text-red-600 rounded-full transition-colors text-gray-600" title="Logout">
+              <LogOut className="w-5 h-5" />
             </button>
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        {/* Conversation List */}
+        <div className="flex-1 overflow-y-auto">
           {conversations.length === 0 ? (
-            <div className="text-center mt-10 p-4">
-              <MessageSquare className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-              <p className="text-gray-500 text-sm">No conversations yet.</p>
+            <div className="flex flex-col items-center justify-center h-48 px-6 text-center">
+              <div className="w-12 h-12 bg-gray-50 rounded-full flex items-center justify-center mb-3">
+                <MessageSquare className="w-6 h-6 text-gray-300" />
+              </div>
+              <p className="text-gray-900 font-medium text-sm">No chats yet</p>
+              <p className="text-gray-500 text-xs mt-1">Start a new conversation to begin secure messaging.</p>
+              <Button size="sm" variant="secondary" className="mt-4" onClick={() => setShowNewChatModal(true)}>
+                Start Chat
+              </Button>
             </div>
           ) : (
-            conversations.map(conv => (
-              <button
-                key={conv.id}
-                onClick={() => handleSelectConversation(conv.id)}
-                className={`w-full p-3 flex items-center gap-3 rounded-lg text-left transition-colors ${activeConversationId === conv.id ? 'bg-white shadow-sm ring-1 ring-gray-200' : 'hover:bg-gray-100'}`}
-              >
-                <div className="w-10 h-10 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 font-medium">
-                   {(conv.otherUser?.displayName || '?').charAt(0).toUpperCase()}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-gray-900 truncate">{conv.otherUser?.displayName}</p>
-                  <p className="text-xs text-gray-500 truncate">{format(new Date(conv.createdAt), 'MMM d')}</p>
-                </div>
-              </button>
-            ))
+            <div className="py-2">
+              {conversations.map(conv => (
+                <button
+                  key={conv.id}
+                  onClick={() => handleSelectConversation(conv.id)}
+                  className={`
+                    w-full px-4 py-3 flex items-center gap-3 text-left transition-colors border-l-4
+                    ${activeConversationId === conv.id 
+                      ? 'bg-blue-50 border-blue-600' 
+                      : 'border-transparent hover:bg-gray-50'
+                    }
+                  `}
+                >
+                  <div className="w-11 h-11 rounded-full bg-gradient-to-br from-gray-100 to-gray-200 flex items-center justify-center text-gray-600 font-medium shrink-0 border border-gray-100">
+                     {getInitials(conv.otherUser?.displayName)}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex justify-between items-baseline mb-0.5">
+                      <p className={`font-semibold text-sm truncate ${activeConversationId === conv.id ? 'text-blue-900' : 'text-gray-900'}`}>
+                        {conv.otherUser?.displayName}
+                      </p>
+                      <span className="text-[10px] text-gray-400">
+                        {format(new Date(conv.createdAt), 'MMM d')}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500 truncate flex items-center gap-1">
+                      <Lock className="w-3 h-3" /> Encrypted message
+                    </p>
+                  </div>
+                </button>
+              ))}
+            </div>
           )}
         </div>
       </aside>
 
-      {/* Main Chat */}
-      <main className={`flex-1 flex flex-col h-full md:ml-80 bg-white transition-opacity duration-200 ${isMobileMenuOpen ? 'opacity-50 pointer-events-none md:opacity-100 md:pointer-events-auto' : 'opacity-100'}`}>
+      {/* Main Chat Area */}
+      <main className="flex-1 flex flex-col h-full bg-[#f0f2f5] relative w-full min-w-0">
         {activeConversationId && activeConv ? (
           <>
-            <header className="h-16 border-b border-gray-200 flex items-center px-4 justify-between bg-white z-10 sticky top-0">
+            {/* Chat Header */}
+            <header className="h-16 flex items-center justify-between px-4 bg-white border-b border-gray-200 shadow-sm shrink-0 z-10">
               <div className="flex items-center gap-3">
-                <button onClick={() => setIsMobileMenuOpen(true)} className="md:hidden p-2 -ml-2 text-gray-500">
+                <button 
+                  onClick={handleBackToMenu} 
+                  className="md:hidden p-2 -ml-2 text-gray-600 hover:bg-gray-100 rounded-full"
+                >
                   <ArrowLeft className="w-5 h-5" />
                 </button>
-                <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-sm font-medium">
-                   {(activeConv.otherUser?.displayName || '?').charAt(0).toUpperCase()}
+                
+                <div className="w-9 h-9 rounded-full bg-gray-200 flex items-center justify-center text-sm font-medium text-gray-700">
+                   {getInitials(activeConv.otherUser?.displayName)}
                 </div>
+                
                 <div>
-                  <h3 className="font-semibold text-gray-900">{activeConv.otherUser?.displayName}</h3>
-                  <div className="flex items-center gap-1 text-xs text-green-600">
-                    <Lock className="w-3 h-3" /> <span>E2EE Secure</span>
+                  <h3 className="font-semibold text-gray-900 text-sm leading-tight">
+                    {activeConv.otherUser?.displayName}
+                  </h3>
+                  <div className="flex items-center gap-1 text-xs text-green-600 font-medium">
+                    <Lock className="w-3 h-3" /> 
+                    <span>End-to-End Encrypted</span>
                   </div>
                 </div>
               </div>
+              
+              <button className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full">
+                <MoreVertical className="w-5 h-5" />
+              </button>
             </header>
 
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50/50">
-              {activeMessages.map((msg) => {
-                const isMe = msg.senderId === currentUser.id;
-                return (
-                  <div key={msg.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[70%] px-4 py-2 rounded-2xl text-sm shadow-sm relative ${isMe ? 'bg-kapsel-primary text-white rounded-br-none' : 'bg-white text-gray-900 border border-gray-100 rounded-bl-none'} ${msg.isSending ? 'opacity-60' : 'opacity-100'}`}>
-                      <p className="whitespace-pre-wrap break-words">{msg.text || '...'}</p>
-                      <div className={`text-[10px] mt-1 text-right flex items-center justify-end gap-1 ${isMe ? 'text-gray-300' : 'text-gray-400'}`}>
-                        {msg.isSending ? <span>Sending...</span> : format(new Date(msg.createdAt), 'HH:mm')}
+            {/* Messages Area */}
+            <div 
+              className="flex-1 overflow-y-auto p-4 space-y-4 bg-contain" 
+              style={{ backgroundImage: 'radial-gradient(#cbd5e1 1px, transparent 1px)', backgroundSize: '20px 20px' }}
+            >
+              {activeMessages.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-gray-400 opacity-60">
+                  <Lock className="w-16 h-16 mb-4" />
+                  <p className="text-sm">No messages yet</p>
+                  <p className="text-xs mt-1">Send a message to start the conversation</p>
+                </div>
+              ) : (
+                activeMessages.map((msg, index) => {
+                  const isMe = msg.senderId === currentUser.id;
+                  const showDate = index === 0 || 
+                    new Date(msg.createdAt).toDateString() !== new Date(activeMessages[index-1].createdAt).toDateString();
+                  
+                  return (
+                    <React.Fragment key={msg.id}>
+                      {showDate && (
+                         <div className="flex justify-center my-4">
+                           <span className="bg-gray-200 text-gray-600 text-[10px] font-medium px-2 py-1 rounded-full uppercase tracking-wider">
+                             {format(new Date(msg.createdAt), 'MMM d, yyyy')}
+                           </span>
+                         </div>
+                      )}
+                      <div className={`flex w-full ${isMe ? 'justify-end' : 'justify-start'}`}>
+                        <div 
+                          className={`
+                            relative max-w-[85%] md:max-w-[65%] px-3 py-2 shadow-sm text-[15px] leading-relaxed
+                            ${isMe 
+                              ? 'bg-kapsel-primary text-white rounded-2xl rounded-tr-sm' 
+                              : 'bg-white text-gray-900 rounded-2xl rounded-tl-sm border border-gray-100'
+                            }
+                          `}
+                        >
+                          {/* Message Text with forced breaks for long words */}
+                          <p className="break-words break-all whitespace-pre-wrap min-w-[2rem]">
+                            {msg.text || '...'}
+                          </p>
+                          
+                          {/* Metadata */}
+                          <div className={`
+                            flex items-center justify-end gap-1 mt-1 text-[10px] select-none
+                            ${isMe ? 'text-gray-300' : 'text-gray-400'}
+                          `}>
+                            <span>{formatMessageTime(msg.createdAt)}</span>
+                            {isMe && (
+                              <span className={msg.isSending ? 'opacity-70' : ''}>
+                                {msg.isSending ? <div className="w-2 h-2 rounded-full border border-current opacity-50" /> : <CheckCheck className="w-3 h-3" />}
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  </div>
-                );
-              })}
+                    </React.Fragment>
+                  );
+                })
+              )}
               <div ref={messagesEndRef} />
             </div>
 
-            <div className="p-3 bg-white border-t border-gray-200">
-              <form onSubmit={handleSendMessage} className="flex gap-2 items-end">
-                <button type="button" className="p-3 text-gray-400 hover:bg-gray-100 rounded-full"><Paperclip className="w-5 h-5" /></button>
-                <button type="button" className="p-3 text-gray-400 hover:bg-gray-100 rounded-full"><Camera className="w-5 h-5" /></button>
-                <div className="flex-1 bg-gray-100 rounded-2xl flex items-center px-4 py-1 min-h-[44px]">
-                   <input
+            {/* Input Area */}
+            <div className="p-3 md:p-4 bg-white border-t border-gray-200 shrink-0">
+              <div className="max-w-4xl mx-auto w-full">
+                <form onSubmit={handleSendMessage} className="flex gap-2 items-end bg-gray-50 p-1.5 rounded-[26px] border border-gray-200 focus-within:border-gray-300 focus-within:ring-1 focus-within:ring-gray-300 transition-all shadow-sm">
+                  <button type="button" className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded-full transition-colors ml-1">
+                    <Plus className="w-6 h-6" />
+                  </button>
+                  
+                  <input
                     type="text"
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
-                    placeholder="Type a secure message..."
-                    className="flex-1 bg-transparent text-sm focus:outline-none min-h-[24px] py-2"
+                    placeholder="Type a message..."
+                    className="flex-1 bg-transparent text-gray-900 placeholder-gray-500 focus:outline-none py-2.5 px-2 text-sm max-h-32 overflow-y-auto"
                   />
-                </div>
-                <button type="submit" disabled={!inputText.trim()} className="p-3 rounded-full bg-kapsel-primary text-white hover:bg-black disabled:opacity-50">
-                  <Send className="w-5 h-5 ml-0.5" />
-                </button>
-              </form>
+                  
+                  {inputText.trim() ? (
+                    <button 
+                      type="submit" 
+                      className="p-2.5 bg-kapsel-primary text-white rounded-full hover:bg-black transition-all shadow-md transform hover:scale-105 active:scale-95"
+                    >
+                      <Send className="w-4 h-4 ml-0.5" />
+                    </button>
+                  ) : (
+                    <div className="flex gap-1 mr-1">
+                      <button type="button" className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded-full transition-colors">
+                        <Camera className="w-5 h-5" />
+                      </button>
+                    </div>
+                  )}
+                </form>
+              </div>
             </div>
           </>
         ) : (
-          <div className="hidden md:flex flex-col items-center justify-center h-full text-gray-400 bg-gray-50/30">
-            <div className="w-24 h-24 bg-gray-100 rounded-full flex items-center justify-center mb-6">
-              <Lock className="w-10 h-10 text-gray-300" />
+          /* Empty State Desktop */
+          <div className="hidden md:flex flex-col items-center justify-center h-full text-center p-8 bg-[#f0f2f5]">
+            <div className="w-40 h-40 bg-gray-100 rounded-full flex items-center justify-center mb-8 shadow-inner animate-pulse">
+              <Lock className="w-16 h-16 text-gray-300" />
             </div>
-            <h2 className="text-xl font-semibold text-gray-900">Welcome to Kapsel</h2>
-            <p className="mt-2 text-sm text-gray-500">Select a conversation to start chatting.</p>
+            <h2 className="text-2xl font-light text-gray-800 mb-2">Welcome to Kapsel</h2>
+            <p className="text-gray-500 max-w-sm">
+              Send and receive messages without keeping your phone online.
+              <br/>Use Kapsel on up to 4 linked devices and 1 phone.
+            </p>
+            <div className="mt-8 flex items-center gap-2 text-xs text-gray-400">
+              <Lock className="w-3 h-3" /> End-to-end encrypted
+            </div>
           </div>
         )}
       </main>
