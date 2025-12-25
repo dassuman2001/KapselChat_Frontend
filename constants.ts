@@ -1,5 +1,5 @@
-export const API_BASE_URL = 'http://localhost:8080/api';
-// export const API_BASE_URL = 'https://fumiest-jon-struttingly.ngrok-free.dev/api';
+// export const API_BASE_URL = 'http://localhost:8080/api';
+export const API_BASE_URL = 'https://fumiest-jon-struttingly.ngrok-free.dev/api';
 
 // export const WS_URL = 'http://localhost:8080/ws';
 export const WS_URL = 'https://fumiest-jon-struttingly.ngrok-free.dev/ws';
