@@ -68,21 +68,16 @@ const App: React.FC = () => {
     }
   }, []); // Empty dependency array []
 
-  // Real-time message listener - dependent on activeConversationId
+  // Real-time message listener - dependent on currentUser ONLY (Global listener)
   useEffect(() => {
-    if (!currentUser || !activeConversationId) return;
+    if (!currentUser) return;
 
     const unsubscribe = socketService.subscribeUserQueue(async (msg) => {
-      // Filter for active conversation only
-      if (msg.conversationId !== activeConversationId) return;
+      // Ignore if duplicate
+      if (processedMessageIds.current.has(msg.id)) return;
+      processedMessageIds.current.add(msg.id);
 
       console.log('⚡ Socket Received:', msg.id);
-
-      // Deduplication check
-      if (processedMessageIds.current.has(msg.id)) {
-         return;
-      }
-      processedMessageIds.current.add(msg.id);
 
       let decryptedText = 'Decryption Failed';
       try {
@@ -90,12 +85,10 @@ const App: React.FC = () => {
       } catch (e) {
         console.error("Failed to decrypt realtime message:", e);
       }
-      const processedMessage = { ...msg, text: decryptedText };
+      const formatted = { ...msg, text: decryptedText };
 
       setMessages((prev) => {
-        // Use structuredClone for deep copy if needed, or spread for specific key
-        // Simplified based on user request to use [activeConversationId] key update
-        const currentList = prev[activeConversationId] || [];
+        const currentList = prev[msg.conversationId] || [];
         
         // Final duplicate check in state
         if (currentList.some(m => m.id === msg.id)) {
@@ -104,20 +97,16 @@ const App: React.FC = () => {
 
         return {
             ...prev,
-            [activeConversationId]: [
+            [msg.conversationId]: [
                 ...currentList,
-                processedMessage
+                formatted
             ].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
         };
       });
-
-      requestAnimationFrame(() =>
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-      );
     });
 
     return () => unsubscribe?.();
-  }, [activeConversationId, currentUser]);
+  }, [currentUser]);
 
   // Persist Active Conversation
   useEffect(() => {
@@ -285,8 +274,6 @@ const App: React.FC = () => {
         });
       }
       
-      // Removed the setTimeout block that deleted optimistic messages
-
     } catch (err) {
       console.error("Failed to send message:", err);
       alert("Failed to send message.");

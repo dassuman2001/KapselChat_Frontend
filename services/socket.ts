@@ -24,11 +24,9 @@ class SocketService {
       appendMissingNULLonIncoming: true,
 
       onConnect: () => {
-        console.log('✅ STOMP: Connected to Native WebSocket');
-        // If we have a registered callback but no subscription yet (e.g. connection came after subscribe call)
-        // we trigger subscription here.
+        console.log("🔗 Reconnected to WebSocket");
         if (this.messageCallback && !this.subscription) {
-            this._subscribeInternal();
+          this._subscribeInternal(); // <- RESUBSCRIBE!
         }
       },
 
@@ -80,20 +78,23 @@ class SocketService {
   public subscribeUserQueue(callback: MessageCallback) {
     this.messageCallback = callback;
 
+    // remove old subscription
     if (this.subscription) {
       this.subscription.unsubscribe();
       this.subscription = null;
     }
 
+    // if already connected → subscribe now
     if (this.client.connected) {
       this._subscribeInternal();
     }
 
+    // RETURN a cleanup function (IMPORTANT)
     return () => {
-      this.subscription?.unsubscribe();
-      this.subscription = null;
-      // We also clear the callback to prevent stale closures if onConnect triggers later
-      this.messageCallback = null; 
+      if (this.subscription) {
+        this.subscription.unsubscribe();
+        this.subscription = null;
+      }
     };
   }
 
