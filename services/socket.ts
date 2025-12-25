@@ -1,5 +1,4 @@
 import { Client, IMessage, StompSubscription } from '@stomp/stompjs';
-import SockJS from 'sockjs-client';
 import { WS_URL, AUTH_TOKEN_KEY } from '../constants';
 import { Message } from '../types';
 
@@ -17,7 +16,7 @@ class SocketService {
 
   constructor() {
     this.client = new Client({
-      webSocketFactory: () => new SockJS(WS_URL),
+      brokerURL: WS_URL,
       
       reconnectDelay: 3000,
       heartbeatIncoming: 10000,
