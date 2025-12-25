@@ -1,180 +1,157 @@
 import { Client, IMessage, StompSubscription } from '@stomp/stompjs';
-import { WS_URL, AUTH_TOKEN_KEY } from '../constants';
+import { WS_URL } from '../constants';
 import { Message } from '../types';
 
 type MessageCallback = (message: Message) => void;
-type ConnectionStatusCallback = (isConnected: boolean) => void;
 
 class SocketService {
   private client: Client;
-  private userSubscription: StompSubscription | null = null;
   private messageCallback: MessageCallback | null = null;
-  private statusCallbacks: Set<ConnectionStatusCallback> = new Set();
-  private _isConnected: boolean = false;
-  private reconnectAttempts: number = 0;
-  private maxReconnectAttempts: number = 10;
+  private subscription: StompSubscription | null = null;
+  
+  // Track if we have explicitly initialized
+  private isInitialized = false;
 
   constructor() {
     this.client = new Client({
-      brokerURL: WS_URL,
-      
-      reconnectDelay: 3000,
+      // We will set brokerURL dynamically in init()
+      reconnectDelay: 5000,
       heartbeatIncoming: 10000,
       heartbeatOutgoing: 10000,
       
-      debug: (str) => {
-        // console.debug('[STOMP]', str);
-      },
+      // Native WebSocket options (no SockJS)
+      forceBinaryWSFrames: true,
+      appendMissingNULLonIncoming: true,
 
       onConnect: () => {
-        console.log('STOMP: Connected successfully');
-        this._isConnected = true;
-        this.reconnectAttempts = 0;
-        this.notifyStatusChange(true);
-        this._subscribeToUserQueue();
+        console.log('✅ STOMP: Connected to Native WebSocket');
+        this._subscribeInternal();
       },
 
       onDisconnect: () => {
-        console.log('STOMP: Disconnected');
-        this.handleDisconnect();
+        console.log('❌ STOMP: Disconnected');
       },
 
       onStompError: (frame) => {
-        console.error('STOMP Error:', frame.headers['message']);
-        this.handleDisconnect();
+        console.error('⚠️ STOMP Error:', frame.headers['message']);
+        console.error('Details:', frame.body);
       },
 
       onWebSocketClose: () => {
-        console.log('STOMP: WebSocket Closed');
-        this.handleDisconnect();
-        
-        if (this.reconnectAttempts < this.maxReconnectAttempts) {
-          this.reconnectAttempts++;
-          console.log(`Attempting reconnection (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
-        }
+        console.log('🔌 STOMP: WebSocket Closed');
       }
     });
   }
 
-  private handleDisconnect() {
-    this._isConnected = false;
-    this.notifyStatusChange(false);
-    if (this.userSubscription) {
-        try {
-            this.userSubscription.unsubscribe();
-        } catch (e) { /* ignore */ }
-    }
-    this.userSubscription = null;
-  }
-
-  get connected() {
-    return this._isConnected;
-  }
-
-  onConnectionChange(callback: ConnectionStatusCallback) {
-    this.statusCallbacks.add(callback);
-    callback(this._isConnected);
-    return () => {
-      this.statusCallbacks.delete(callback);
-    };
-  }
-
   /**
-   * Register a global handler for all incoming messages (user queue).
+   * Initialize the connection ONCE.
+   * Passing the token allows constructing the wss://.../?token=... URL
    */
-  onMessage(callback: MessageCallback) {
-    this.messageCallback = callback;
-  }
-
-  private notifyStatusChange(isConnected: boolean) {
-    this.statusCallbacks.forEach(cb => cb(isConnected));
-  }
-
-  activate() {
-    const token = localStorage.getItem(AUTH_TOKEN_KEY);
-    if (token) {
-      this.client.connectHeaders = {
-        Authorization: `Bearer ${token}`
-      };
-      console.log('STOMP: Activating with Auth Token');
-    } else {
-      console.warn('STOMP: Activating without Auth Token');
-    }
-
-    try {
-      this.client.activate();
-    } catch (error) {
-      console.error('Failed to activate STOMP client:', error);
-    }
-  }
-
-  deactivate() {
-    console.log('STOMP: Deactivating...');
-    this.handleDisconnect();
-    this.messageCallback = null;
-    
-    try {
-      this.client.deactivate();
-    } catch (error) {
-      console.error('Failed to deactivate STOMP client:', error);
-    }
-  }
-
-  /**
-   * Subscribes to the user-specific queue. 
-   * Backend sends to /user/{userId}/queue/messages, client subscribes to /user/queue/messages.
-   */
-  private _subscribeToUserQueue() {
-    if (this.userSubscription) {
+  public init(token: string) {
+    if (this.isInitialized && this.client.active) {
+      console.log('STOMP: Already initialized and active, skipping.');
       return;
     }
 
-    // CRITICAL: Subscribe EXACTLY to /user/queue/messages per requirements
+    console.log('STOMP: Initializing connection...');
+    
+    // 6. Remove SockJS usage. Use native WebSocket with token in URL param.
+    this.client.brokerURL = `${WS_URL}?token=${token}`;
+    
+    // Also set standard headers just in case backend supports both
+    this.client.connectHeaders = {
+      Authorization: `Bearer ${token}`
+    };
+
+    try {
+      this.client.activate();
+      this.isInitialized = true;
+    } catch (e) {
+      console.error('STOMP: Activation failed', e);
+    }
+  }
+
+  /**
+   * 3. subscribeUserQueue(callback)
+   * Sets the global callback and triggers subscription if connected.
+   */
+  public subscribeUserQueue(callback: MessageCallback) {
+    this.messageCallback = callback;
+    
+    // If already connected, ensure we are subscribed
+    if (this.client.connected) {
+      this._subscribeInternal();
+    }
+  }
+
+  /**
+   * Internal method to handle the actual STOMP subscription frame.
+   * Ensures we don't subscribe multiple times to the same topic.
+   */
+  private _subscribeInternal() {
+    if (this.subscription) {
+      // Already subscribed
+      return;
+    }
+
+    // 7. Ensure subscriptions listen to /user/queue/messages
     const destination = '/user/queue/messages';
     console.log(`STOMP: Subscribing to ${destination}`);
-    
+
     try {
-      this.userSubscription = this.client.subscribe(destination, (message: IMessage) => {
+      this.subscription = this.client.subscribe(destination, (message: IMessage) => {
         try {
-          console.log('STOMP: Message received from queue:', message.body);
           const body: Message = JSON.parse(message.body);
           if (this.messageCallback) {
             this.messageCallback(body);
           }
-        } catch (err) {
-          console.error('STOMP: Failed to parse or handle message:', err);
+        } catch (e) {
+          console.error('STOMP: Failed to parse incoming message', e);
         }
       });
     } catch (e) {
-      console.error(`STOMP: Subscribe failed for ${destination}:`, e);
+      console.error('STOMP: Subscription failed', e);
     }
   }
 
-  sendMessage(conversationId: string, senderId: string, ciphertext: string, iv: string): boolean {
-    if (!this._isConnected) {
-      console.warn('STOMP: Not connected, cannot send via socket');
+  /**
+   * 3. sendMessage(conversationId, ciphertext, iv)
+   */
+  public sendMessage(conversationId: string, senderId: string, ciphertext: string, iv: string) {
+    if (!this.client.connected) {
+      console.warn('STOMP: Cannot send, socket not connected.');
       return false;
     }
 
+    const payload = {
+      conversationId,
+      senderId,
+      ciphertext,
+      iv
+    };
+
     try {
-      const payload = {
-        conversationId,
-        senderId,
-        ciphertext,
-        iv
-      };
-      
       this.client.publish({
         destination: '/app/chat.sendMessage',
-        body: JSON.stringify(payload),
+        body: JSON.stringify(payload)
       });
-      
       return true;
     } catch (e) {
-      console.error("STOMP: Publish failed:", e);
+      console.error('STOMP: Publish error', e);
       return false;
     }
+  }
+
+  public deactivate() {
+    this.isInitialized = false;
+    this.messageCallback = null;
+    if (this.subscription) {
+      this.subscription.unsubscribe();
+      this.subscription = null;
+    }
+    this.client.deactivate();
   }
 }
 
+// 1. Export a single instance
 export const socketService = new SocketService();

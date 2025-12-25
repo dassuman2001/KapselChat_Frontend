@@ -61,7 +61,7 @@ export const encryptMessage = async (text: string): Promise<{ ciphertext: string
 
     return {
       ciphertext: ab2base64(encryptedContent),
-      iv: ab2base64(iv.buffer),
+      iv: ab2base64(iv.buffer as ArrayBuffer),
     };
   } catch (error) {
     console.error("Encryption failed:", error);

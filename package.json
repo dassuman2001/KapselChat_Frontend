@@ -16,8 +16,7 @@
     "date-fns": "^4.1.0",
     "axios": "^1.13.2",
     "clsx": "^2.1.1",
-    "@stomp/stompjs": "^7.2.1",
-    "sockjs-client": "1.6.1"
+    "@stomp/stompjs": "^7.2.1"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
