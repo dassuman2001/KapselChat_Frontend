@@ -25,7 +25,11 @@ class SocketService {
 
       onConnect: () => {
         console.log('✅ STOMP: Connected to Native WebSocket');
-        this._subscribeInternal();
+        // If we have a registered callback but no subscription yet (e.g. connection came after subscribe call)
+        // we trigger subscription here.
+        if (this.messageCallback && !this.subscription) {
+            this._subscribeInternal();
+        }
       },
 
       onDisconnect: () => {
@@ -55,10 +59,8 @@ class SocketService {
 
     console.log('STOMP: Initializing connection...');
     
-    // 6. Remove SockJS usage. Use native WebSocket with token in URL param.
     this.client.brokerURL = `${WS_URL}?token=${token}`;
     
-    // Also set standard headers just in case backend supports both
     this.client.connectHeaders = {
       Authorization: `Bearer ${token}`
     };
@@ -72,29 +74,33 @@ class SocketService {
   }
 
   /**
-   * 3. subscribeUserQueue(callback)
-   * Sets the global callback and triggers subscription if connected.
+   * subscribeUserQueue(callback)
+   * Handles subscription to the user queue. Returns cleanup function.
    */
   public subscribeUserQueue(callback: MessageCallback) {
     this.messageCallback = callback;
-    
-    // If already connected, ensure we are subscribed
+
+    if (this.subscription) {
+      this.subscription.unsubscribe();
+      this.subscription = null;
+    }
+
     if (this.client.connected) {
       this._subscribeInternal();
     }
+
+    return () => {
+      this.subscription?.unsubscribe();
+      this.subscription = null;
+      // We also clear the callback to prevent stale closures if onConnect triggers later
+      this.messageCallback = null; 
+    };
   }
 
   /**
    * Internal method to handle the actual STOMP subscription frame.
-   * Ensures we don't subscribe multiple times to the same topic.
    */
   private _subscribeInternal() {
-    if (this.subscription) {
-      // Already subscribed
-      return;
-    }
-
-    // 7. Ensure subscriptions listen to /user/queue/messages
     const destination = '/user/queue/messages';
     console.log(`STOMP: Subscribing to ${destination}`);
 
@@ -115,7 +121,7 @@ class SocketService {
   }
 
   /**
-   * 3. sendMessage(conversationId, ciphertext, iv)
+   * sendMessage(conversationId, ciphertext, iv)
    */
   public sendMessage(conversationId: string, senderId: string, ciphertext: string, iv: string) {
     if (!this.client.connected) {
@@ -153,5 +159,4 @@ class SocketService {
   }
 }
 
-// 1. Export a single instance
 export const socketService = new SocketService();

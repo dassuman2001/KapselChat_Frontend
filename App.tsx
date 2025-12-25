@@ -63,56 +63,61 @@ const App: React.FC = () => {
     if (token && storedUser) {
       const user = JSON.parse(storedUser);
       setCurrentUser(user);
-
       // 4a. Call socket.init(token)
       socketService.init(token);
-
-      // 4b. Attach ONE subscription listener
-      socketService.subscribeUserQueue(async (msg: Message) => {
-        console.log('⚡ Socket Received:', msg.id);
-
-        // Deduplication check
-        if (processedMessageIds.current.has(msg.id)) {
-           return;
-        }
-        processedMessageIds.current.add(msg.id);
-
-        // Decrypt immediately
-        let decryptedText = 'Decryption Failed';
-        try {
-          decryptedText = await decryptMessage(msg.ciphertext, msg.iv);
-        } catch (e) {
-          console.error("Failed to decrypt realtime message:", e);
-        }
-        const processedMessage = { ...msg, text: decryptedText };
-
-        // 5. State update fix: Use structuredClone / Immutable copy
-        setMessages((prev) => {
-          // Deep copy the previous state
-          const copy = structuredClone(prev);
-
-          // Ensure array exists
-          if (!copy[msg.conversationId]) {
-            copy[msg.conversationId] = [];
-          }
-
-          // Check for duplicate in array (double safety)
-          const exists = copy[msg.conversationId].some((m: Message) => m.id === msg.id);
-          if (!exists) {
-            // Add new message
-            copy[msg.conversationId].push(processedMessage);
-            
-            // Sort
-            copy[msg.conversationId].sort((a: Message, b: Message) => 
-               new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-            );
-          }
-          
-          return copy;
-        });
-      });
     }
   }, []); // Empty dependency array []
+
+  // Real-time message listener - dependent on activeConversationId
+  useEffect(() => {
+    if (!currentUser || !activeConversationId) return;
+
+    const unsubscribe = socketService.subscribeUserQueue(async (msg) => {
+      // Filter for active conversation only
+      if (msg.conversationId !== activeConversationId) return;
+
+      console.log('⚡ Socket Received:', msg.id);
+
+      // Deduplication check
+      if (processedMessageIds.current.has(msg.id)) {
+         return;
+      }
+      processedMessageIds.current.add(msg.id);
+
+      let decryptedText = 'Decryption Failed';
+      try {
+        decryptedText = await decryptMessage(msg.ciphertext, msg.iv);
+      } catch (e) {
+        console.error("Failed to decrypt realtime message:", e);
+      }
+      const processedMessage = { ...msg, text: decryptedText };
+
+      setMessages((prev) => {
+        // Use structuredClone for deep copy if needed, or spread for specific key
+        // Simplified based on user request to use [activeConversationId] key update
+        const currentList = prev[activeConversationId] || [];
+        
+        // Final duplicate check in state
+        if (currentList.some(m => m.id === msg.id)) {
+            return prev;
+        }
+
+        return {
+            ...prev,
+            [activeConversationId]: [
+                ...currentList,
+                processedMessage
+            ].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+        };
+      });
+
+      requestAnimationFrame(() =>
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+      );
+    });
+
+    return () => unsubscribe?.();
+  }, [activeConversationId, currentUser]);
 
   // Persist Active Conversation
   useEffect(() => {
@@ -224,9 +229,6 @@ const App: React.FC = () => {
 
   const handleBackToMenu = () => {
     setIsMobileMenuOpen(true);
-    // Optional: setActiveConversationId(null) if we want to "close" the chat logic-wise
-    // But keeping it selected allows returning to the same state. 
-    // Usually, back button just shows the list.
   };
 
   const handleSendMessage = async (e: React.FormEvent) => {
@@ -255,7 +257,7 @@ const App: React.FC = () => {
         isSending: true
       };
 
-      // Optimistic update using structuredClone
+      // Optimistic update
       setMessages(prev => {
         const copy = structuredClone(prev);
         if (!copy[activeConversationId]) copy[activeConversationId] = [];
@@ -266,18 +268,9 @@ const App: React.FC = () => {
       // 3. socket.sendMessage
       const sentViaSocket = socketService.sendMessage(activeConversationId, currentUser.id, ciphertext, iv);
       
-      if (sentViaSocket) {
-        setTimeout(() => {
-          setMessages(prev => {
-             const copy = structuredClone(prev);
-             if (copy[activeConversationId]) {
-                copy[activeConversationId] = copy[activeConversationId].filter((m: Message) => m.id !== tempId);
-             }
-             return copy;
-          });
-        }, 3000); 
-      } else {
-        // Fallback to REST
+      if (!sentViaSocket) {
+        // Fallback to REST only if socket failed immediately
+        // If socket sent true, we wait for echo via subscription
         const responseMsg = await messageApi.send(activeConversationId, ciphertext, iv);
         processedMessageIds.current.add(responseMsg.id);
         
@@ -291,6 +284,8 @@ const App: React.FC = () => {
           return copy;
         });
       }
+      
+      // Removed the setTimeout block that deleted optimistic messages
 
     } catch (err) {
       console.error("Failed to send message:", err);
