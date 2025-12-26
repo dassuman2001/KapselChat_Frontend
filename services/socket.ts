@@ -1,6 +1,8 @@
 import { Client, IMessage, StompSubscription } from '@stomp/stompjs';
 import { WS_URL } from '../constants';
 import { Message } from '../types';
+import SockJS from 'sockjs-client';
+
 
 type MessageCallback = (message: Message) => void;
 
@@ -20,8 +22,8 @@ class SocketService {
       heartbeatOutgoing: 10000,
       
       // Native WebSocket options (no SockJS)
-      forceBinaryWSFrames: true,
-      appendMissingNULLonIncoming: true,
+      // forceBinaryWSFrames: true, // SockJS might not support this same way
+      // appendMissingNULLonIncoming: true,
 
       onConnect: () => {
         console.log("🔗 Reconnected to WebSocket");
@@ -50,26 +52,33 @@ class SocketService {
    * Passing the token allows constructing the wss://.../?token=... URL
    */
   public init(token: string) {
-    if (this.isInitialized && this.client.active) {
-      console.log('STOMP: Already initialized and active, skipping.');
-      return;
-    }
-
-    console.log('STOMP: Initializing connection...');
-    
-    this.client.brokerURL = `${WS_URL}?token=${token}`;
-    
-    this.client.connectHeaders = {
-      Authorization: `Bearer ${token}`
-    };
-
-    try {
-      this.client.activate();
-      this.isInitialized = true;
-    } catch (e) {
-      console.error('STOMP: Activation failed', e);
-    }
+  if (this.isInitialized && this.client.active) {
+    console.log('STOMP: Already initialized and active, skipping.');
+    return;
   }
+
+  console.log('STOMP: Initializing connection...');
+
+  // SockJS requires http/https, not ws/wss
+  const sockJsUrl = WS_URL
+    .replace("wss://", "https://")
+    .replace("ws://", "http://");
+
+  this.client.webSocketFactory = () => new SockJS(sockJsUrl);
+
+  // 👇 The correct way to authenticate
+  this.client.connectHeaders = {
+    Authorization: `Bearer ${token}`
+  };
+
+  try {
+    this.client.activate();
+    this.isInitialized = true;
+  } catch (e) {
+    console.error('STOMP: Activation failed', e);
+  }
+}
+
 
   /**
    * subscribeUserQueue(callback)
