@@ -3,37 +3,29 @@ import { WS_URL } from '../constants';
 import { Message } from '../types';
 import SockJS from 'sockjs-client';
 
-
 type MessageCallback = (message: Message) => void;
 
 class SocketService {
   private client: Client;
   private messageCallback: MessageCallback | null = null;
   private subscription: StompSubscription | null = null;
-  
-  // Track if we have explicitly initialized
   private isInitialized = false;
 
   constructor() {
     this.client = new Client({
-      // We will set brokerURL dynamically in init()
       reconnectDelay: 5000,
       heartbeatIncoming: 10000,
       heartbeatOutgoing: 10000,
-      
-      // Native WebSocket options (no SockJS)
-      // forceBinaryWSFrames: true, // SockJS might not support this same way
-      // appendMissingNULLonIncoming: true,
 
       onConnect: () => {
-        console.log("🔗 Reconnected to WebSocket");
-        if (this.messageCallback && !this.subscription) {
-          this._subscribeInternal(); // <- RESUBSCRIBE!
+        console.log("🟢 WebSocket Connected!");
+        if (this.messageCallback) {
+          this._subscribeInternal();
         }
       },
 
       onDisconnect: () => {
-        console.log('❌ STOMP: Disconnected');
+        console.log('🔴 STOMP: Disconnected');
       },
 
       onStompError: (frame) => {
@@ -42,100 +34,95 @@ class SocketService {
       },
 
       onWebSocketClose: () => {
-        console.log('🔌 STOMP: WebSocket Closed');
+        console.log('🔌 WebSocket Closed');
       }
     });
   }
 
-  /**
-   * Initialize the connection ONCE.
-   * Passing the token allows constructing the wss://.../?token=... URL
-   */
   public init(token: string) {
-  if (this.isInitialized && this.client.active) {
-    console.log('STOMP: Already initialized and active, skipping.');
-    return;
+    if (this.isInitialized && this.client.active) {
+      console.log('✅ Already connected');
+      return;
+    }
+
+    console.log('🚀 Initializing WebSocket...');
+
+    // Convert wss:// to https:// for SockJS
+    const baseUrl = WS_URL
+      .replace("wss://", "https://")
+      .replace("ws://", "http://");
+
+    // 🔥 CRITICAL FIX: Backend expects token as query param
+    const urlWithToken = `${baseUrl}?token=${token}`;
+
+    this.client.webSocketFactory = () => {
+      console.log('🔗 Connecting to:', urlWithToken);
+      return new SockJS(urlWithToken);
+    };
+
+    // Don't use connectHeaders - backend reads from URL
+    this.client.connectHeaders = {};
+
+    try {
+      this.client.activate();
+      this.isInitialized = true;
+      console.log('✅ STOMP activated');
+    } catch (e) {
+      console.error('❌ Activation failed:', e);
+    }
   }
 
-  console.log('STOMP: Initializing connection...');
-
-  // SockJS requires http/https, not ws/wss
-  const sockJsUrl = WS_URL
-    .replace("wss://", "https://")
-    .replace("ws://", "http://");
-
-  this.client.webSocketFactory = () => new SockJS(sockJsUrl);
-
-  // 👇 The correct way to authenticate
-  this.client.connectHeaders = {
-    Authorization: `Bearer ${token}`
-  };
-
-  try {
-    this.client.activate();
-    this.isInitialized = true;
-  } catch (e) {
-    console.error('STOMP: Activation failed', e);
-  }
-}
-
-
-  /**
-   * subscribeUserQueue(callback)
-   * Handles subscription to the user queue. Returns cleanup function.
-   */
   public subscribeUserQueue(callback: MessageCallback) {
+    console.log('📡 Setting up message listener');
     this.messageCallback = callback;
 
-    // remove old subscription
     if (this.subscription) {
       this.subscription.unsubscribe();
       this.subscription = null;
     }
 
-    // if already connected → subscribe now
     if (this.client.connected) {
       this._subscribeInternal();
+    } else {
+      console.log('⏳ Waiting for connection...');
     }
 
-    // RETURN a cleanup function (IMPORTANT)
     return () => {
+      console.log('🧹 Cleanup subscription');
       if (this.subscription) {
         this.subscription.unsubscribe();
         this.subscription = null;
       }
+      this.messageCallback = null;
     };
   }
 
-  /**
-   * Internal method to handle the actual STOMP subscription frame.
-   */
   private _subscribeInternal() {
     const destination = '/user/queue/messages';
-    console.log(`STOMP: Subscribing to ${destination}`);
+    console.log(`📬 Subscribing to: ${destination}`);
 
     try {
       this.subscription = this.client.subscribe(destination, (message: IMessage) => {
+        console.log('📨 Message received!');
         try {
           const body: Message = JSON.parse(message.body);
+          console.log('✅ Parsed message ID:', body.id);
           if (this.messageCallback) {
             this.messageCallback(body);
           }
         } catch (e) {
-          console.error('STOMP: Failed to parse incoming message', e);
+          console.error('❌ Parse error:', e);
         }
       });
+      console.log('✅ Subscription active');
     } catch (e) {
-      console.error('STOMP: Subscription failed', e);
+      console.error('❌ Subscribe failed:', e);
     }
   }
 
-  /**
-   * sendMessage(conversationId, ciphertext, iv)
-   */
-  public sendMessage(conversationId: string, senderId: string, ciphertext: string, iv: string) {
+  public sendMessage(conversationId: string, senderId: string, ciphertext: string, iv: string): boolean {
     if (!this.client.connected) {
-      console.warn('STOMP: Cannot send, socket not connected.');
+      console.warn('⚠️ Not connected, cannot send');
       return false;
     }
 
@@ -146,19 +133,23 @@ class SocketService {
       iv
     };
 
+    console.log('📤 Sending message:', { conversationId, senderId });
+
     try {
       this.client.publish({
         destination: '/app/chat.sendMessage',
         body: JSON.stringify(payload)
       });
+      console.log('✅ Message sent via WebSocket');
       return true;
     } catch (e) {
-      console.error('STOMP: Publish error', e);
+      console.error('❌ Send failed:', e);
       return false;
     }
   }
 
   public deactivate() {
+    console.log('🛑 Deactivating');
     this.isInitialized = false;
     this.messageCallback = null;
     if (this.subscription) {
@@ -166,6 +157,10 @@ class SocketService {
       this.subscription = null;
     }
     this.client.deactivate();
+  }
+
+  public isConnected(): boolean {
+    return this.client.connected;
   }
 }
 
