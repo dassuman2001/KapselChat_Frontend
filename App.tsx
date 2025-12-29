@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Auth } from './components/Auth';
 import { NewChatModal } from './components/NewChatModal';
 import { conversationApi, messageApi, userApi } from './services/api';
@@ -59,54 +59,60 @@ const App: React.FC = () => {
     }
   }, []);
 
+  const handleIncomingMessage = useCallback(async (msg: Message) => {
+    console.log('WebSocket message received:', msg.id, 'Conversation:', msg.conversationId);
+    
+    if (processedMessageIds.current.has(msg.id)) {
+      console.log('Duplicate message detected, skipping:', msg.id);
+      return;
+    }
+    
+    processedMessageIds.current.add(msg.id);
+
+    let decryptedText = 'Decryption Failed';
+    try {
+      decryptedText = await decryptMessage(msg.ciphertext, msg.iv);
+      console.log('Message decrypted successfully');
+    } catch (e) {
+      console.error("Failed to decrypt realtime message:", e);
+    }
+    
+    const formatted = { ...msg, text: decryptedText };
+
+    console.log('Updating messages state with new message');
+    
+    setMessages((prevMessages) => {
+      const conversationMessages = prevMessages[msg.conversationId] || [];
+      
+      if (conversationMessages.some(m => m.id === msg.id)) {
+        console.log('Message already in state, skipping update');
+        return prevMessages;
+      }
+
+      const updatedConversationMessages = [...conversationMessages, formatted]
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+      console.log('State updated, total messages for conversation:', updatedConversationMessages.length);
+      
+      return {
+        ...prevMessages,
+        [msg.conversationId]: updatedConversationMessages
+      };
+    });
+  }, []);
+
   useEffect(() => {
     if (!currentUser) return;
 
-    console.log('Setting up WebSocket message listener');
+    console.log('Setting up WebSocket message listener for user:', currentUser.id);
     
-    const unsubscribe = socketService.subscribeUserQueue(async (msg) => {
-      if (processedMessageIds.current.has(msg.id)) {
-        console.log('Duplicate message detected, skipping:', msg.id);
-        return;
-      }
-      
-      processedMessageIds.current.add(msg.id);
-      console.log('Processing new WebSocket message:', msg.id);
-
-      let decryptedText = 'Decryption Failed';
-      try {
-        decryptedText = await decryptMessage(msg.ciphertext, msg.iv);
-      } catch (e) {
-        console.error("Failed to decrypt realtime message:", e);
-      }
-      
-      const formatted = { ...msg, text: decryptedText };
-
-      setMessages((prevMessages) => {
-        const conversationMessages = prevMessages[msg.conversationId] || [];
-        
-        if (conversationMessages.some(m => m.id === msg.id)) {
-          console.log('Message already in state, skipping');
-          return prevMessages;
-        }
-
-        const updatedConversationMessages = [...conversationMessages, formatted]
-          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-
-        console.log('Adding message to state for conversation:', msg.conversationId);
-        
-        return {
-          ...prevMessages,
-          [msg.conversationId]: updatedConversationMessages
-        };
-      });
-    });
+    const unsubscribe = socketService.subscribeUserQueue(handleIncomingMessage);
 
     return () => {
       console.log('Cleaning up WebSocket subscription');
       if (unsubscribe) unsubscribe();
     };
-  }, [currentUser]);
+  }, [currentUser, handleIncomingMessage]);
 
   useEffect(() => {
     if (activeConversationId) {
@@ -125,13 +131,16 @@ const App: React.FC = () => {
       }
       
       if (messages[activeConversationId]?.length > 0) {
+        console.log('Messages already loaded for conversation, skipping fetch');
         return;
       }
 
       isLoadingHistory.current.add(activeConversationId);
+      console.log('Loading message history for conversation:', activeConversationId);
       
       try {
         const history = await messageApi.getForConversation(activeConversationId);
+        console.log('Loaded', history.length, 'messages from history');
         
         const decryptedHistory = await Promise.all(history.map(async (m) => {
           processedMessageIds.current.add(m.id);
@@ -223,7 +232,7 @@ const App: React.FC = () => {
     const textToSend = inputText.trim();
     setInputText('');
 
-    const tempId = `temp-${Date.now()}`;
+    const tempId = `temp-${Date.now()}-${Math.random()}`;
 
     try {
       const { ciphertext, iv } = await encryptMessage(textToSend);
@@ -249,6 +258,7 @@ const App: React.FC = () => {
         };
       });
 
+      console.log('Sending message via WebSocket');
       const sentViaSocket = socketService.sendMessage(
         activeConversationId, 
         currentUser.id, 
@@ -256,7 +266,25 @@ const App: React.FC = () => {
         iv
       );
       
-      if (!sentViaSocket) {
+      if (sentViaSocket) {
+        console.log('Message sent via WebSocket, waiting for echo');
+        
+        setTimeout(() => {
+          setMessages(prev => {
+            const conversationMessages = prev[activeConversationId] || [];
+            const stillSending = conversationMessages.some(m => m.id === tempId && m.isSending);
+            
+            if (stillSending) {
+              console.log('Message echo not received, removing optimistic message');
+              return {
+                ...prev,
+                [activeConversationId]: conversationMessages.filter(m => m.id !== tempId)
+              };
+            }
+            return prev;
+          });
+        }, 5000);
+      } else {
         console.log('WebSocket send failed, using REST fallback');
         const responseMsg = await messageApi.send(activeConversationId, ciphertext, iv);
         processedMessageIds.current.add(responseMsg.id);
@@ -271,8 +299,6 @@ const App: React.FC = () => {
             [activeConversationId]: updatedMessages
           };
         });
-      } else {
-        console.log('Message sent via WebSocket successfully');
       }
       
     } catch (err) {
@@ -305,7 +331,7 @@ const App: React.FC = () => {
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, activeConversationId, isMobileMenuOpen]);
+  }, [messages, activeConversationId]);
 
   const formatMessageTime = (dateStr: string) => {
     const date = new Date(dateStr);
@@ -322,7 +348,6 @@ const App: React.FC = () => {
       const token = localStorage.getItem(AUTH_TOKEN_KEY);
       if (token) {
          socketService.init(token);
-         window.location.reload(); 
       }
     }} />;
   }
