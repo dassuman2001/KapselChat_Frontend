@@ -1,8 +1,12 @@
-export const API_BASE_URL = 'http://localhost:8080/api';
+// export const API_BASE_URL = 'http://localhost:8080/api';
 // export const API_BASE_URL = 'https://fumiest-jon-struttingly.ngrok-free.dev/api';
+export const API_BASE_URL = 'https://through-director-instead-spirituality.trycloudflare.com/api';
 
-export const WS_URL = 'ws://localhost:8080/ws';
+
+
+// export const WS_URL = 'ws://localhost:8080/ws';
 // export const WS_URL = 'wss://fumiest-jon-struttingly.ngrok-free.dev/ws';
+export const WS_URL = 'wss://through-director-instead-spirituality.trycloudflare.com/ws';
 
 export const USER_CACHE_KEY = 'kapsel_user_cache';
 export const AUTH_TOKEN_KEY = 'kapsel_auth_token';
