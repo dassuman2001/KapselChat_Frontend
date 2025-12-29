@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Auth } from './components/Auth';
 import { NewChatModal } from './components/NewChatModal';
 import { conversationApi, messageApi, userApi } from './services/api';
-import { socketService } from './services/socket'; // The new global file
+import { socketService } from './services/socket';
 import { encryptMessage, decryptMessage } from './services/crypto';
 import { 
   User, 
@@ -42,20 +42,12 @@ const App: React.FC = () => {
   const [messages, setMessages] = useState<Record<string, Message[]>>({});
   const [inputText, setInputText] = useState('');
   const [showNewChatModal, setShowNewChatModal] = useState(false);
-  
-  // Mobile Menu State
-  // Default: Open if no chat selected, Closed if chat selected (on mobile)
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(!activeConversationId);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
-
-  // Track processed message IDs to prevent duplicates
   const processedMessageIds = useRef<Set<string>>(new Set());
   const isLoadingHistory = useRef<Set<string>>(new Set());
 
-  // ------------------------------------------------------------
-  // 4. Initialize ONCE in App.tsx
-  // ------------------------------------------------------------
   useEffect(() => {
     const token = localStorage.getItem(AUTH_TOKEN_KEY);
     const storedUser = localStorage.getItem(LOGGED_IN_USER_KEY);
@@ -63,21 +55,23 @@ const App: React.FC = () => {
     if (token && storedUser) {
       const user = JSON.parse(storedUser);
       setCurrentUser(user);
-      // 4a. Call socket.init(token)
       socketService.init(token);
     }
-  }, []); // Empty dependency array []
+  }, []);
 
-  // Real-time message listener - dependent on currentUser ONLY (Global listener)
   useEffect(() => {
     if (!currentUser) return;
 
+    console.log('Setting up WebSocket message listener');
+    
     const unsubscribe = socketService.subscribeUserQueue(async (msg) => {
-      // Ignore if duplicate
-      if (processedMessageIds.current.has(msg.id)) return;
+      if (processedMessageIds.current.has(msg.id)) {
+        console.log('Duplicate message detected, skipping:', msg.id);
+        return;
+      }
+      
       processedMessageIds.current.add(msg.id);
-
-      console.log('⚡ Socket Received:', msg.id);
+      console.log('Processing new WebSocket message:', msg.id);
 
       let decryptedText = 'Decryption Failed';
       try {
@@ -85,30 +79,35 @@ const App: React.FC = () => {
       } catch (e) {
         console.error("Failed to decrypt realtime message:", e);
       }
+      
       const formatted = { ...msg, text: decryptedText };
 
-      setMessages((prev) => {
-        const currentList = prev[msg.conversationId] || [];
+      setMessages((prevMessages) => {
+        const conversationMessages = prevMessages[msg.conversationId] || [];
         
-        // Final duplicate check in state
-        if (currentList.some(m => m.id === msg.id)) {
-            return prev;
+        if (conversationMessages.some(m => m.id === msg.id)) {
+          console.log('Message already in state, skipping');
+          return prevMessages;
         }
 
+        const updatedConversationMessages = [...conversationMessages, formatted]
+          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+        console.log('Adding message to state for conversation:', msg.conversationId);
+        
         return {
-            ...prev,
-            [msg.conversationId]: [
-                ...currentList,
-                formatted
-            ].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+          ...prevMessages,
+          [msg.conversationId]: updatedConversationMessages
         };
       });
     });
 
-    return () => unsubscribe?.();
+    return () => {
+      console.log('Cleaning up WebSocket subscription');
+      if (unsubscribe) unsubscribe();
+    };
   }, [currentUser]);
 
-  // Persist Active Conversation
   useEffect(() => {
     if (activeConversationId) {
       localStorage.setItem(ACTIVE_CONVERSATION_KEY, activeConversationId);
@@ -117,7 +116,6 @@ const App: React.FC = () => {
     }
   }, [activeConversationId]);
 
-  // Load message history when conversation becomes active
   useEffect(() => {
     if (!activeConversationId || !currentUser) return;
 
@@ -126,7 +124,6 @@ const App: React.FC = () => {
         return;
       }
       
-      // If we already have messages, don't fetch (realtime will handle new ones)
       if (messages[activeConversationId]?.length > 0) {
         return;
       }
@@ -141,17 +138,18 @@ const App: React.FC = () => {
           let text = 'Decryption Failed';
           try {
             text = await decryptMessage(m.ciphertext, m.iv);
-          } catch (e) { /* ignore */ }
+          } catch (e) {
+            console.error('Decryption error:', e);
+          }
           return { ...m, text };
         }));
         
-        setMessages(prev => {
-          const copy = structuredClone(prev);
-          copy[activeConversationId] = decryptedHistory.sort((a: Message, b: Message) => 
+        setMessages(prev => ({
+          ...prev,
+          [activeConversationId]: decryptedHistory.sort((a, b) => 
             new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-          );
-          return copy;
-        });
+          )
+        }));
         
       } catch (err) {
         console.error("Failed to load history:", err);
@@ -163,7 +161,6 @@ const App: React.FC = () => {
     loadHistory();
   }, [activeConversationId, currentUser]);
 
-  // Fetch Conversations
   const fetchConversations = async () => {
     if (!currentUser) return;
     try {
@@ -195,7 +192,6 @@ const App: React.FC = () => {
 
         if (cacheUpdated) {
           localStorage.setItem(USER_CACHE_KEY, JSON.stringify(cache));
-          // Re-map with new cache
           setConversations(prev => prev.map(c => {
             const otherId = c.participantIds.find(id => id !== currentUser?.id);
             return { ...c, otherUser: cache[otherId!] || c.otherUser };
@@ -213,7 +209,7 @@ const App: React.FC = () => {
 
   const handleSelectConversation = (convId: string) => {
     setActiveConversationId(convId);
-    setIsMobileMenuOpen(false); // Close menu on mobile
+    setIsMobileMenuOpen(false);
   };
 
   const handleBackToMenu = () => {
@@ -227,7 +223,6 @@ const App: React.FC = () => {
     const textToSend = inputText.trim();
     setInputText('');
 
-    // Temporary ID for optimistic UI
     const tempId = `temp-${Date.now()}`;
 
     try {
@@ -246,37 +241,51 @@ const App: React.FC = () => {
         isSending: true
       };
 
-      // Optimistic update
       setMessages(prev => {
-        const copy = structuredClone(prev);
-        if (!copy[activeConversationId]) copy[activeConversationId] = [];
-        copy[activeConversationId].push(optimisticMsg);
-        return copy;
+        const conversationMessages = prev[activeConversationId] || [];
+        return {
+          ...prev,
+          [activeConversationId]: [...conversationMessages, optimisticMsg]
+        };
       });
 
-      // 3. socket.sendMessage
-      const sentViaSocket = socketService.sendMessage(activeConversationId, currentUser.id, ciphertext, iv);
+      const sentViaSocket = socketService.sendMessage(
+        activeConversationId, 
+        currentUser.id, 
+        ciphertext, 
+        iv
+      );
       
       if (!sentViaSocket) {
-        // Fallback to REST only if socket failed immediately
-        // If socket sent true, we wait for echo via subscription
+        console.log('WebSocket send failed, using REST fallback');
         const responseMsg = await messageApi.send(activeConversationId, ciphertext, iv);
         processedMessageIds.current.add(responseMsg.id);
         
         setMessages(prev => {
-          const copy = structuredClone(prev);
-          if (copy[activeConversationId]) {
-            copy[activeConversationId] = copy[activeConversationId].map((m: Message) => 
-              m.id === tempId ? { ...responseMsg, text: textToSend, isSending: false } : m
-            );
-          }
-          return copy;
+          const conversationMessages = prev[activeConversationId] || [];
+          const updatedMessages = conversationMessages.map(m => 
+            m.id === tempId ? { ...responseMsg, text: textToSend, isSending: false } : m
+          );
+          return {
+            ...prev,
+            [activeConversationId]: updatedMessages
+          };
         });
+      } else {
+        console.log('Message sent via WebSocket successfully');
       }
       
     } catch (err) {
       console.error("Failed to send message:", err);
       alert("Failed to send message.");
+      
+      setMessages(prev => {
+        const conversationMessages = prev[activeConversationId] || [];
+        return {
+          ...prev,
+          [activeConversationId]: conversationMessages.filter(m => m.id !== tempId)
+        };
+      });
     }
   };
 
@@ -292,7 +301,6 @@ const App: React.FC = () => {
     processedMessageIds.current.clear();
   };
 
-  // Auto-scroll
   useEffect(() => {
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -324,7 +332,6 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen overflow-hidden bg-gray-100">
-      {/* Sidebar - Responsive */}
       <aside 
         className={`
           fixed inset-y-0 left-0 z-50 w-full md:w-80 bg-white border-r border-gray-200 
@@ -333,7 +340,6 @@ const App: React.FC = () => {
           flex flex-col shadow-xl md:shadow-none
         `}
       >
-        {/* Sidebar Header */}
         <div className="h-16 px-4 flex items-center justify-between border-b border-gray-100 bg-white shrink-0">
           <div className="flex items-center gap-3">
             <div className="relative">
@@ -356,7 +362,6 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Conversation List */}
         <div className="flex-1 overflow-y-auto">
           {conversations.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-48 px-6 text-center">
@@ -406,11 +411,9 @@ const App: React.FC = () => {
         </div>
       </aside>
 
-      {/* Main Chat Area */}
       <main className="flex-1 flex flex-col h-full bg-[#f0f2f5] relative w-full min-w-0">
         {activeConversationId && activeConv ? (
           <>
-            {/* Chat Header */}
             <header className="h-16 flex items-center justify-between px-4 bg-white border-b border-gray-200 shadow-sm shrink-0 z-10">
               <div className="flex items-center gap-3">
                 <button 
@@ -440,7 +443,6 @@ const App: React.FC = () => {
               </button>
             </header>
 
-            {/* Messages Area */}
             <div 
               className="flex-1 overflow-y-auto p-4 space-y-4 bg-contain" 
               style={{ backgroundImage: 'radial-gradient(#cbd5e1 1px, transparent 1px)', backgroundSize: '20px 20px' }}
@@ -476,12 +478,10 @@ const App: React.FC = () => {
                             }
                           `}
                         >
-                          {/* Message Text with forced breaks for long words */}
                           <p className="break-words break-all whitespace-pre-wrap min-w-[2rem]">
                             {msg.text || '...'}
                           </p>
                           
-                          {/* Metadata */}
                           <div className={`
                             flex items-center justify-end gap-1 mt-1 text-[10px] select-none
                             ${isMe ? 'text-gray-300' : 'text-gray-400'}
@@ -502,7 +502,6 @@ const App: React.FC = () => {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Input Area */}
             <div className="p-3 md:p-4 bg-white border-t border-gray-200 shrink-0">
               <div className="max-w-4xl mx-auto w-full">
                 <form onSubmit={handleSendMessage} className="flex gap-2 items-end bg-gray-50 p-1.5 rounded-[26px] border border-gray-200 focus-within:border-gray-300 focus-within:ring-1 focus-within:ring-gray-300 transition-all shadow-sm">
@@ -537,7 +536,6 @@ const App: React.FC = () => {
             </div>
           </>
         ) : (
-          /* Empty State Desktop */
           <div className="hidden md:flex flex-col items-center justify-center h-full text-center p-8 bg-[#f0f2f5]">
             <div className="w-40 h-40 bg-gray-100 rounded-full flex items-center justify-center mb-8 shadow-inner animate-pulse">
               <Lock className="w-16 h-16 text-gray-300" />
