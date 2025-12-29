@@ -1,6 +1,7 @@
 import { Client, IMessage, StompSubscription } from '@stomp/stompjs';
 import { WS_URL } from '../constants';
 import { Message } from '../types';
+// @ts-ignore
 import SockJS from 'sockjs-client';
 
 type MessageCallback = (message: Message) => void;
