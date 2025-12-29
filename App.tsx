@@ -38,15 +38,19 @@ const App: React.FC = () => {
   });
   
   const [messages, setMessages] = useState<Record<string, Message[]>>({});
+  const [forceUpdate, setForceUpdate] = useState(0);
   const [inputText, setInputText] = useState('');
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(!activeConversationId);
-  const [wsConnected, setWsConnected] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const processedMessageIds = useRef<Set<string>>(new Set());
   const isLoadingHistory = useRef<Set<string>>(new Set());
-  const messageHandlerRef = useRef<((msg: Message) => void) | null>(null);
+  const messagesRef = useRef<Record<string, Message[]>>({});
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
     const token = localStorage.getItem(AUTH_TOKEN_KEY);
@@ -63,16 +67,13 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!currentUser) return;
 
-    console.log('Creating WebSocket message handler');
+    console.log('Setting up WebSocket subscription for user:', currentUser.id);
     
     const handleMessage = async (msg: Message) => {
-      console.log('=== WEBSOCKET MESSAGE RECEIVED ===');
-      console.log('Message ID:', msg.id);
-      console.log('Conversation ID:', msg.conversationId);
-      console.log('Sender ID:', msg.senderId);
+      console.log('WebSocket message received:', msg.id, 'for conversation:', msg.conversationId);
       
       if (processedMessageIds.current.has(msg.id)) {
-        console.log('Skipping duplicate message:', msg.id);
+        console.log('Skipping duplicate message');
         return;
       }
       
@@ -81,57 +82,45 @@ const App: React.FC = () => {
       let decryptedText = 'Decryption Failed';
       try {
         decryptedText = await decryptMessage(msg.ciphertext, msg.iv);
-        console.log('Decrypted text:', decryptedText);
+        console.log('Message decrypted successfully');
       } catch (e) {
         console.error("Decryption failed:", e);
       }
       
-      const formatted = { ...msg, text: decryptedText, isSending: false };
+      const formatted: Message = { 
+        ...msg, 
+        text: decryptedText, 
+        isSending: false 
+      };
 
-      console.log('Calling setMessages to update state...');
+      const currentMessages = messagesRef.current[msg.conversationId] || [];
       
-      setMessages((prevMessages) => {
-        console.log('Current state for conversation:', prevMessages[msg.conversationId]?.length || 0, 'messages');
-        
-        const conversationMessages = prevMessages[msg.conversationId] || [];
-        
-        if (conversationMessages.some(m => m.id === msg.id)) {
-          console.log('Message already exists in state');
-          return prevMessages;
-        }
+      if (currentMessages.some(m => m.id === msg.id)) {
+        console.log('Message already exists in current state');
+        return;
+      }
 
-        const updatedMessages = [...conversationMessages, formatted]
-          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      const updatedMessages = [...currentMessages, formatted]
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
-        console.log('Updated state will have:', updatedMessages.length, 'messages');
-        
-        const newState = {
-          ...prevMessages,
-          [msg.conversationId]: updatedMessages
-        };
-        
-        return newState;
-      });
+      const newMessagesState = {
+        ...messagesRef.current,
+        [msg.conversationId]: updatedMessages
+      };
+
+      console.log('Updating state with new message. Total messages:', updatedMessages.length);
       
-      console.log('=== MESSAGE PROCESSING COMPLETE ===');
+      messagesRef.current = newMessagesState;
+      setMessages(newMessagesState);
+      setForceUpdate(prev => prev + 1);
+      
+      console.log('State updated and force render triggered');
     };
 
-    messageHandlerRef.current = handleMessage;
-
-    console.log('Subscribing to WebSocket user queue');
     const unsubscribe = socketService.subscribeUserQueue(handleMessage);
-
-    if (socketService.isConnected()) {
-      console.log('WebSocket is connected');
-      setWsConnected(true);
-    } else {
-      console.log('WebSocket is NOT connected');
-      setWsConnected(false);
-    }
 
     return () => {
       console.log('Cleaning up WebSocket subscription');
-      messageHandlerRef.current = null;
       if (unsubscribe) unsubscribe();
     };
   }, [currentUser]);
@@ -153,12 +142,11 @@ const App: React.FC = () => {
       }
       
       if (messages[activeConversationId]?.length > 0) {
-        console.log('Messages already loaded, skipping');
         return;
       }
 
       isLoadingHistory.current.add(activeConversationId);
-      console.log('Loading history for conversation:', activeConversationId);
+      console.log('Loading message history for:', activeConversationId);
       
       try {
         const history = await messageApi.getForConversation(activeConversationId);
@@ -170,21 +158,22 @@ const App: React.FC = () => {
           try {
             text = await decryptMessage(m.ciphertext, m.iv);
           } catch (e) {
-            console.error('Decryption error for message:', m.id);
+            console.error('Decryption error:', e);
           }
           return { ...m, text };
         }));
         
-        setMessages(prev => {
-          const newState = {
-            ...prev,
-            [activeConversationId]: decryptedHistory.sort((a, b) => 
-              new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-            )
-          };
-          console.log('History loaded, state updated');
-          return newState;
-        });
+        const sortedHistory = decryptedHistory.sort((a, b) => 
+          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
+
+        const newState = {
+          ...messagesRef.current,
+          [activeConversationId]: sortedHistory
+        };
+        
+        messagesRef.current = newState;
+        setMessages(newState);
         
       } catch (err) {
         console.error("Failed to load message history:", err);
@@ -243,7 +232,6 @@ const App: React.FC = () => {
   }, [currentUser]);
 
   const handleSelectConversation = (convId: string) => {
-    console.log('Selected conversation:', convId);
     setActiveConversationId(convId);
     setIsMobileMenuOpen(false);
   };
@@ -277,14 +265,14 @@ const App: React.FC = () => {
         isSending: true
       };
 
-      console.log('Adding optimistic message:', tempId);
-      setMessages(prev => {
-        const conversationMessages = prev[activeConversationId] || [];
-        return {
-          ...prev,
-          [activeConversationId]: [...conversationMessages, optimisticMsg]
-        };
-      });
+      const currentConvMessages = messagesRef.current[activeConversationId] || [];
+      const newState = {
+        ...messagesRef.current,
+        [activeConversationId]: [...currentConvMessages, optimisticMsg]
+      };
+      
+      messagesRef.current = newState;
+      setMessages(newState);
 
       console.log('Sending message via WebSocket');
       const sentViaSocket = socketService.sendMessage(
@@ -294,41 +282,42 @@ const App: React.FC = () => {
         iv
       );
       
-      if (sentViaSocket) {
-        console.log('Message sent successfully via WebSocket');
-      } else {
-        console.warn('WebSocket send failed, using REST API fallback');
+      if (!sentViaSocket) {
+        console.warn('WebSocket send failed, using REST API');
         const responseMsg = await messageApi.send(activeConversationId, ciphertext, iv);
         processedMessageIds.current.add(responseMsg.id);
         
-        setMessages(prev => {
-          const conversationMessages = prev[activeConversationId] || [];
-          const updatedMessages = conversationMessages.map(m => 
-            m.id === tempId ? { ...responseMsg, text: textToSend, isSending: false } : m
-          );
-          return {
-            ...prev,
-            [activeConversationId]: updatedMessages
-          };
-        });
+        const updatedConvMessages = (messagesRef.current[activeConversationId] || []).map(m => 
+          m.id === tempId ? { ...responseMsg, text: textToSend, isSending: false } : m
+        );
+        
+        const fallbackState = {
+          ...messagesRef.current,
+          [activeConversationId]: updatedConvMessages
+        };
+        
+        messagesRef.current = fallbackState;
+        setMessages(fallbackState);
       }
       
     } catch (err) {
       console.error("Failed to send message:", err);
       alert("Failed to send message. Please try again.");
       
-      setMessages(prev => {
-        const conversationMessages = prev[activeConversationId] || [];
-        return {
-          ...prev,
-          [activeConversationId]: conversationMessages.filter(m => m.id !== tempId)
-        };
-      });
+      const filteredMessages = (messagesRef.current[activeConversationId] || [])
+        .filter(m => m.id !== tempId);
+      
+      const errorState = {
+        ...messagesRef.current,
+        [activeConversationId]: filteredMessages
+      };
+      
+      messagesRef.current = errorState;
+      setMessages(errorState);
     }
   };
 
   const handleLogout = () => {
-    console.log('Logging out and deactivating WebSocket');
     socketService.deactivate();
     localStorage.removeItem(AUTH_TOKEN_KEY);
     localStorage.removeItem(LOGGED_IN_USER_KEY);
@@ -336,6 +325,7 @@ const App: React.FC = () => {
     setCurrentUser(null);
     setConversations([]);
     setMessages({});
+    messagesRef.current = {};
     setActiveConversationId(null);
     processedMessageIds.current.clear();
   };
@@ -344,7 +334,7 @@ const App: React.FC = () => {
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, activeConversationId]);
+  }, [messages, activeConversationId, forceUpdate]);
 
   const formatMessageTime = (dateStr: string) => {
     const date = new Date(dateStr);
@@ -368,8 +358,6 @@ const App: React.FC = () => {
   const activeConv = conversations.find(c => c.id === activeConversationId);
   const activeMessages = activeConversationId ? messages[activeConversationId] || [] : [];
 
-  console.log('Rendering with', activeMessages.length, 'messages for active conversation');
-
   return (
     <div className="flex h-screen overflow-hidden bg-gray-100">
       <aside 
@@ -386,7 +374,7 @@ const App: React.FC = () => {
               <div className="w-9 h-9 rounded-full bg-kapsel-primary flex items-center justify-center text-white font-bold shadow-sm">
                  {getInitials(currentUser.displayName)}
               </div>
-              <div className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-white ${wsConnected ? 'bg-green-500' : 'bg-gray-400'}`}></div>
+              <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-white"></div>
             </div>
             <span className="font-semibold text-gray-900 truncate max-w-[120px] text-sm">
                {currentUser.displayName}
@@ -500,7 +488,7 @@ const App: React.FC = () => {
                     new Date(msg.createdAt).toDateString() !== new Date(activeMessages[index-1].createdAt).toDateString();
                   
                   return (
-                    <React.Fragment key={msg.id}>
+                    <React.Fragment key={`${msg.id}-${forceUpdate}`}>
                       {showDate && (
                          <div className="flex justify-center my-4">
                            <span className="bg-gray-200 text-gray-600 text-[10px] font-medium px-2 py-1 rounded-full uppercase tracking-wider">
